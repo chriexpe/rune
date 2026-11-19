@@ -584,3 +584,31 @@ fn ime_sync_state_reset_preserves_mirror_diff_when_empty_field_blurs() {
     assert!(changed || reset, "mirror must sync back to empty key so DOM focus returns to canvas");
     assert!(mirror.key.is_empty());
 }
+
+#[test]
+fn an_unchanged_ime_area_goes_to_the_platform_once() {
+    let mut ime = ImeSync::default();
+    ime.set_allowed(true);
+    let area = [10.0, 20.0, 1.0, 18.0];
+    assert_eq!(ime.area_to_send(Some(area)), Some(area));
+    for _ in 0..3 { assert_eq!(ime.area_to_send(Some(area)), None, "a resting field sends nothing"); }
+    let moved = [11.0, 20.0, 1.0, 18.0];
+    assert_eq!(ime.area_to_send(Some(moved)), Some(moved), "a caret that moved sends its new area");
+    assert_eq!(ime.area_to_send(None), None);
+}
+
+#[test]
+fn turning_the_input_method_off_or_on_again_resends_the_area() {
+    let area = [10.0, 20.0, 1.0, 18.0];
+    let mut ime = ImeSync::default();
+    ime.set_allowed(true);
+    ime.area_to_send(Some(area));
+    ime.disallow();
+    assert!(!ime.allowed);
+    ime.set_allowed(true);
+    assert_eq!(ime.area_to_send(Some(area)), Some(area), "after a blur the platform has no area");
+    ime.set_allowed(true);
+    assert_eq!(ime.area_to_send(Some(area)), Some(area), "an IME reset forgets the area too");
+    ime.sent(area);
+    assert_eq!(ime.area_to_send(Some(area)), None, "an area a focus change sent is not sent again");
+}

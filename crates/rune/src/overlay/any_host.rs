@@ -158,7 +158,7 @@ impl AnyHost for OverlayHost {
                 {
                     crate::platform::ime::cancel(window);
                     window.set_ime_allowed(false);
-                    core.ime_allowed = false;
+                    core.ime.disallow();
                 }
             }
             app.rt_mut().ignore_minimize("an overlay");

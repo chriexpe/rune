@@ -503,16 +503,52 @@ pub(crate) fn pointer_cancel(
     true
 }
 
+/// What a host last told the platform's input method: whether it is on, and the cursor area it
+/// was given. The area goes out only when it changes: on Wayland each `set_ime_cursor_area`
+/// commits the text-input state, and the compositor's answer wakes the window for another frame,
+/// so sending an unchanged area every frame kept a focused field drawing at the refresh rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ImeSync {
+    pub(crate) allowed: bool,
+    area_sent: Option<[f32; 4]>,
+}
+
+impl ImeSync {
+    /// The input method was turned off (a blur, a hide, the window winding down): the next time
+    /// it is on, the area goes out again.
+    pub(crate) fn disallow(&mut self) {
+        *self = ImeSync::default();
+    }
+
+    /// The input method was turned on or off, or reset: the platform forgets the area, so the
+    /// next one goes out whatever it is.
+    pub(crate) fn set_allowed(&mut self, allowed: bool) {
+        *self = ImeSync { allowed, area_sent: None };
+    }
+
+    /// `area` when the platform doesn't have it yet, recorded as sent; None when it does.
+    pub(crate) fn area_to_send(&mut self, area: Option<[f32; 4]>) -> Option<[f32; 4]> {
+        let area = area.filter(|a| self.area_sent != Some(*a))?;
+        self.area_sent = Some(area);
+        Some(area)
+    }
+
+    /// `area` went out by another path (a focus change sends it unconditionally).
+    pub(crate) fn sent(&mut self, area: [f32; 4]) {
+        self.area_sent = Some(area);
+    }
+}
+
 /// Synchronizes a window's OS IME allowance, cursor area, and published text with the runtime.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime_state: &mut bool, focused: bool) {
+pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime: &mut ImeSync, focused: bool) {
     let (reset, area) = ime_sync_state(rt);
     let ime_allowed = area.is_some() && !rt.has_secure_focus() && focused;
     if reset { crate::platform::ime::cancel(window); }
-    if reset || ime_allowed != *ime_state {
+    if reset || ime_allowed != ime.allowed {
         window.set_ime_allowed(false);
         window.set_ime_allowed(ime_allowed);
-        *ime_state = ime_allowed;
+        ime.set_allowed(ime_allowed);
     }
     #[cfg(target_os = "macos")]
     {
@@ -523,7 +559,7 @@ pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime_state: &mut bo
         }
     }
     crate::platform::ime::sync(window, if ime_allowed { rt.ime_text() } else { None });
-    if let Some(a) = area {
+    if let Some(a) = ime.area_to_send(area) {
         window.set_ime_cursor_area(
             LogicalPosition::new(a[0] as f64, a[1] as f64),
             LogicalSize::new(a[2] as f64, a[3] as f64),

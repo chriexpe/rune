@@ -460,7 +460,7 @@ impl Host {
             { w.native.prime.stop(); }
         }
         self.secure_input.set(false);
-        self.ime_allowed = false;
+        self.ime.disallow();
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
         self.app.set_live_visible(false);
         self.app.rt_mut().cancel_timer_frame();

@@ -398,19 +398,20 @@ impl Host {
                     // `window_focus` wrote the composition into its field: the input method drops its copy.
                     crate::platform::ime::cancel(&l.window);
                     l.window.set_ime_allowed(false);
-                    self.ime_allowed = false;
+                    self.ime.disallow();
                     // A minimized or occluded window skips redraw.
                     l.apply_cursor_core(rt, false);
                 } else if rt.stale() {
                     rt.edit.ime_reset = true;
                 } else {
                     let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus();
-                    if std::mem::take(&mut rt.edit.ime_reset) || ime_allowed != self.ime_allowed {
+                    if std::mem::take(&mut rt.edit.ime_reset) || ime_allowed != self.ime.allowed {
                         l.window.set_ime_allowed(false);
                         l.window.set_ime_allowed(ime_allowed);
-                        self.ime_allowed = ime_allowed;
+                        self.ime.set_allowed(ime_allowed);
                     }
                     if let Some(a) = rt.ime_area.map(|a| rt.to_window(a)) {
+                        self.ime.sent(a);
                         l.window.set_ime_cursor_area(
                             LogicalPosition::new(a[0] as f64, a[1] as f64),
                             LogicalSize::new(a[2] as f64, a[3] as f64),
