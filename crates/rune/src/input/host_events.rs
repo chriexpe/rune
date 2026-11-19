@@ -504,13 +504,15 @@ pub(crate) fn pointer_cancel(
 }
 
 /// What a host last told the platform's input method: whether it is on, and the cursor area it
-/// was given. The area goes out only when it changes: on Wayland each `set_ime_cursor_area`
-/// commits the text-input state, and the compositor's answer wakes the window for another frame,
-/// so sending an unchanged area every frame kept a focused field drawing at the refresh rate.
+/// was given, in window points at the window's scale then. The area goes out only when it or the
+/// scale changes: on Wayland each `set_ime_cursor_area` commits the text-input state, and the
+/// compositor's answer wakes the window for another frame, so sending an unchanged area every
+/// frame kept a focused field drawing at the refresh rate. The scale counts because winit turns
+/// the points into pixels when it sends them (X11, Windows), so a scale change moves the area.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ImeSync {
     pub(crate) allowed: bool,
-    area_sent: Option<[f32; 4]>,
+    area_sent: Option<([f32; 4], f64)>,
 }
 
 impl ImeSync {
@@ -526,16 +528,16 @@ impl ImeSync {
         *self = ImeSync { allowed, area_sent: None };
     }
 
-    /// `area` when the platform doesn't have it yet, recorded as sent; None when it does.
-    pub(crate) fn area_to_send(&mut self, area: Option<[f32; 4]>) -> Option<[f32; 4]> {
-        let area = area.filter(|a| self.area_sent != Some(*a))?;
-        self.area_sent = Some(area);
+    /// `area` when the platform doesn't have it at `scale` yet, recorded as sent; None when it does.
+    pub(crate) fn area_to_send(&mut self, area: Option<[f32; 4]>, scale: f64) -> Option<[f32; 4]> {
+        let area = area.filter(|a| self.area_sent != Some((*a, scale)))?;
+        self.area_sent = Some((area, scale));
         Some(area)
     }
 
-    /// `area` went out by another path (a focus change sends it unconditionally).
-    pub(crate) fn sent(&mut self, area: [f32; 4]) {
-        self.area_sent = Some(area);
+    /// `area` went out at `scale` by another path (a focus change sends it unconditionally).
+    pub(crate) fn sent(&mut self, area: [f32; 4], scale: f64) {
+        self.area_sent = Some((area, scale));
     }
 }
 
@@ -559,7 +561,7 @@ pub(crate) fn sync_ime(window: &Window, rt: &mut RuntimeCore, ime: &mut ImeSync,
         }
     }
     crate::platform::ime::sync(window, if ime_allowed { rt.ime_text() } else { None });
-    if let Some(a) = ime.area_to_send(area) {
+    if let Some(a) = ime.area_to_send(area, window.scale_factor()) {
         window.set_ime_cursor_area(
             LogicalPosition::new(a[0] as f64, a[1] as f64),
             LogicalSize::new(a[2] as f64, a[3] as f64),

@@ -411,7 +411,7 @@ impl Host {
                         self.ime.set_allowed(ime_allowed);
                     }
                     if let Some(a) = rt.ime_area.map(|a| rt.to_window(a)) {
-                        self.ime.sent(a);
+                        self.ime.sent(a, l.window.scale_factor());
                         l.window.set_ime_cursor_area(
                             LogicalPosition::new(a[0] as f64, a[1] as f64),
                             LogicalSize::new(a[2] as f64, a[3] as f64),
