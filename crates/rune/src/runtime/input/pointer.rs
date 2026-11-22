@@ -279,7 +279,9 @@ impl RuntimeCore {
         // Inside a control that owns its keyboard (`El::on_key`), a click on any part of it
         // focuses it, as a click on a table view's row focuses the table.
         // A `Cx::web_focus` control that keeps the field's focus on a press (`preserve_focus_on_press`)
-        // doesn't take it, as a button whose mousedown is prevented.
+        // doesn't take it, as a button whose mousedown is prevented. Nor does a focusable control
+        // or keyboard owner that sets it itself: it takes focus only from the keyboard, as a
+        // list row reached by its arrows while a click leaves the typing where it was.
         // So does a click on plain content in a focusable scroll region, as a web page focuses a
         // `tabIndex` scroller (a `ScrollView`) clicked where nothing inside takes focus; and a
         // press on a layer that hands focus below it (`El::press_focuses_below`) focuses the one
@@ -291,12 +293,13 @@ impl RuntimeCore {
                 None => {}
             }
         }
-        let takes_focus = n.focus.enabled || (self.takes_focus(n) && !self.press_keeps_focus(ti));
-        let keyed = (!takes_focus && !self.is_selectable(ti)).then(|| std::iter::successors(n.parent, |&p| self.tree.nodes[p].parent)
+        let preserve_focus = self.press_keeps_focus(ti);
+        let takes_focus = (n.focus.enabled && !n.focus.preserve_on_press.focus) || (self.takes_focus(n) && !preserve_focus);
+        let keyed = (!takes_focus && !self.is_selectable(ti) && !preserve_focus).then(|| std::iter::successors(n.parent, |&p| self.tree.nodes[p].parent)
             .take_while(|&p| self.allowed(p))
             .find(|&p| (self.tree.nodes[p].focus.key.is_some() || self.focuses_on_click(p)) && self.can_focus(p))).flatten();
         let in_textbox = std::iter::successors(n.parent, |&p| self.tree.nodes[p].parent).any(|p| self.textbox_input(p).is_some());
-        let (preserve_focus, keeps) = (self.press_keeps_focus(ti), self.press_keeps_selection(ti));
+        let keeps = self.press_keeps_selection(ti);
         let below = n.focus.below;
         if !below && !on_link && !keeps && takes_focus && !self.is_selectable(ti) {
             self.frame.queue.push(Action::FocusControl(n.path.clone()));

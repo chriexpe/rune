@@ -140,6 +140,11 @@ impl El {
     /// focused instead of blurring it. Works on any element, not only popups: a list row, a
     /// button, a toolbar. The press still reaches `on_press` and the other handlers, and a
     /// scroll still cancels it as usual. Focusable descendants still take focus normally.
+    ///
+    /// On an element that is focusable itself or owns its keyboard ([`El::on_key`]), a click
+    /// leaves it unfocused too: it takes focus only from the keyboard (Tab, a focus group's
+    /// arrows, [`Tx::focus`]), as a message list's rows do in a chat while typing stays in the
+    /// composer. Clicks inside it select text as usual.
     pub fn preserve_focus_on_press(mut self, enabled: bool) -> Self {
         if enabled || !self.cold.focus.is_empty() {
             self.cold_mut().focus.preserve_on_press.focus = enabled;

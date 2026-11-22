@@ -433,3 +433,35 @@ fn interactive_overlay_immediately_after_non_interactive_help_suppresses_tooltip
     rt.frame(rt.help_delay + 0.1);
     assert!(rt.help_tooltip().is_some(), "uncovered interactive element still shows its own tooltip");
 }
+
+#[test]
+fn a_row_that_preserves_focus_is_focused_only_from_the_keyboard() {
+    // Rows of a list a composer keeps typing over: focusable and owning their keys, yet a
+    // click on one (its padding or a plain child) leaves the field focused. The same row
+    // without the flag takes focus, as a table view's row does.
+    fn view(s: &bool, _: &mut Cx<bool>) -> El {
+        let row = el()
+            .key("row")
+            .size(80.0, 80.0)
+            .padding(20.0)
+            .focusable(true)
+            .on_key(|_: &mut bool, _, _| false)
+            .child(el().key("child").size(40.0, 40.0));
+        if *s { row.preserve_focus_on_press(true) } else { row }
+    }
+    for preserve in [true, false] {
+        let mut rt = Runtime::new(preserve, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        for (x, y) in [(5.0, 5.0), (30.0, 30.0)] {
+            rt.kbd.focus.focus = crate::runtime::focus_machine::Focus::On { path: "field".into(), hovered: false, from: None };
+            rt.frame.queue.retain(|_| false);
+            rt.pointer_down(x, y);
+            let focused_row = rt.frame.queue.iter().any(|action| matches!(action, Action::FocusControl(path) if path.ends_with("row")));
+            let blurred = rt.frame.queue.iter().any(|action| matches!(action, Action::Blur));
+            assert_eq!(focused_row, !preserve, "preserve {preserve} at {x},{y}");
+            assert!(!blurred, "the field keeps focus or the row takes it: never a blur");
+            rt.pointer_up(x, y);
+            rt.frame(0.0);
+        }
+    }
+}
