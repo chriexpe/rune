@@ -328,3 +328,38 @@ fn a_pill_copied_from_one_rich_field_pastes_whole_into_another() {
     paste_into(&mut rt, |s| &mut s.hooked);
     assert_eq!(pills_of(&rt.state.hooked), [(2..10, "agent:x".to_owned())]);
 }
+
+#[test]
+fn a_fields_app_strikes_are_drawn_and_follow_a_preedit() {
+    struct App {
+        edit: TextEdit,
+        struck: bool,
+    }
+    fn view(s: &App, _: &mut Cx<App>) -> El {
+        let mut field = text_input(&s.edit, TextStyle::new(14.0, 400.0))
+            .key("ed")
+            .size(300.0, 40.0)
+            .on_edit(|s: &mut App| &mut s.edit);
+        if s.struck {
+            // "struck" in "a struck word". Spans set after the strike rebuild the field's
+            // display; the strike must survive that.
+            field = field.strike(2, 8, None).spans(vec![Span::new(9, 13).weight(600.0)]);
+        } else {
+            field = field.spans(vec![Span::new(9, 13).weight(600.0)]);
+        }
+        col().size(320.0, 60.0).child(field)
+    }
+    let mut edit = TextEdit::new("a struck word");
+    edit.focused = true;
+    edit.set_caret(0);
+    let mut rt = Runtime::new(App { edit, struck: false }, view, (320.0, 60.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let plain = rt.instances.len();
+    rt.update(|s, _| s.struck = true);
+    rt.frame(0.0);
+    assert!(rt.instances.len() > plain, "the strike line is drawn");
+    let struck = rt.instances.len();
+    rt.ime(Ime::Preedit("か".into(), Some((3, 3)), Vec::new()));
+    rt.frame(0.0);
+    assert!(rt.instances.len() >= struck, "still drawn with a preedit before it");
+}

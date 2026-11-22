@@ -111,9 +111,16 @@ impl El {
         self
     }
     /// A strikethrough line across bytes `start..end` in `color` (`None`: the span's or text's
-    /// colour). Wrapped lines each get their own segment.
+    /// colour). Wrapped lines each get their own segment. On a [`text_input`], byte offsets are
+    /// relative to `edit.text` and shift across any active IME preedit, as [`El::spans`] do.
     pub fn strike(mut self, start: usize, end: usize, color: Option<Color>) -> Self {
-        if let Some(t) = &mut self.text && start < end {
+        if start >= end {
+            return self;
+        }
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.decoration_strikes.push((start as u32, end as u32, color));
+            self.sync_input_rich();
+        } else if let Some(t) = &mut self.text {
             t.cold.strikes.push((start as u32, end as u32, color));
         }
         self
@@ -222,7 +229,7 @@ impl El {
     pub(crate) fn sync_input_rich(&mut self) {
         let (Some(inp), Some(t)) = (&self.cold.input, &mut self.text) else { return };
         t.cold.rich_style = Some(inp.rich_style);
-        if inp.edit.is_plain() && inp.decorations.is_empty() {
+        if inp.edit.is_plain() && inp.decorations.is_empty() && inp.decoration_strikes.is_empty() {
             // A plain field lays out and draws exactly as before rich editing existed.
             t.spans.clear();
             t.cold.strikes.clear();
@@ -231,7 +238,7 @@ impl El {
             t.cold.pills.clear();
             return;
         }
-        let (mut base_spans, strikes, rich_links, blocks) =
+        let (mut base_spans, mut strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
         for d in &inp.decorations {
             for (ds, de) in inp.edit.map_range_to_display(d.start as usize, d.end as usize) {
@@ -239,6 +246,11 @@ impl El {
                 sp.start = ds;
                 sp.end = de;
                 base_spans.push(sp);
+            }
+        }
+        for &(start, end, color) in &inp.decoration_strikes {
+            for (ds, de) in inp.edit.map_range_to_display(start as usize, end as usize) {
+                strikes.push((ds, de, color));
             }
         }
         let pill_fg = t.cold.pill_colors.and_then(|(_, fg)| fg);
