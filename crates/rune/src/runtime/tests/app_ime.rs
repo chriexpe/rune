@@ -87,3 +87,43 @@ fn without_on_ime_an_ime_cursor_hears_nothing() {
     press(&mut rt, Key::Enter);
     assert_eq!(rt.state.log, ["key Enter"], "nothing composing holds Return back");
 }
+
+#[derive(Default)]
+struct Notes {
+    field: TextEdit,
+}
+
+fn notes_view(s: &Notes, _: &mut Cx<Notes>) -> El {
+    col().size(300.0, 200.0).child(crate::auto_grow(
+        text_input(&s.field, TextStyle::new(14.0, 400.0)).key("field").on_edit(|s: &mut Notes| &mut s.field),
+        1,
+        3,
+    ))
+}
+
+#[test]
+fn an_empty_preedit_leaves_a_focused_field_where_the_wheel_put_it() {
+    let lines: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+    let mut field = TextEdit::new(lines.join("\n"));
+    field.focused = true;
+    let mut rt = Runtime::new(Notes { field }, notes_view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // Typing at the end leaves the field scrolled to its last line.
+    rt.key(KeyEvent { key: Key::End, mods: Mods { cmd: true, ..Mods::default() } });
+    rt.key(KeyEvent { key: Key::Text("!".into()), mods: Mods::default() });
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    let top = |rt: &Runtime<Notes>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("field")).map(|e| e.rect[1]);
+    let at_caret = top(&rt);
+    for _ in 0..10 { rt.wheel(20.0, 20.0, 120.0); rt.frame(1.0 / 60.0); }
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    let scrolled = top(&rt);
+    assert_ne!(scrolled, at_caret, "the wheel scrolled the field");
+    rt.ime(Ime::Preedit(String::new(), None, Vec::new()));
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    assert_eq!(top(&rt), scrolled, "an empty preedit with nothing composing moves nothing");
+    rt.ime(Ime::Preedit("ka".into(), None, Vec::new()));
+    rt.frame(1.0 / 60.0);
+    rt.ime(Ime::Preedit(String::new(), None, Vec::new()));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.field.preedit().is_none(), "an empty preedit still cancels a composition");
+}

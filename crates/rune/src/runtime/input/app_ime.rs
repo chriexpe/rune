@@ -56,6 +56,12 @@ impl RuntimeCore {
     /// method turning on or off is only the app's to hear.
     pub(in crate::runtime) fn run_ime(&mut self, app: &mut dyn AppDriver, ev: Ime, one: &mut Tx) -> bool {
         let app_target = self.app_ime_composing(app) || matches!(ev, Ime::Enabled | Ime::Disabled) || self.focused_input().is_none();
+        // An empty preedit while the focused field composes nothing changes nothing. Wayland's
+        // text input sends one to a focused field unasked; run as an edit, it would follow the
+        // caret and undo the reader's scroll (#992).
+        if !app_target && matches!(&ev, Ime::Preedit(s, ..) if s.is_empty()) && !self.composing(app) {
+            return false;
+        }
         let active = self.composing(app) || matches!(&ev, Ime::Preedit(s, ..) | Ime::Commit(s) if !s.is_empty());
         let ran = if app_target { self.app_ime_event(app, &ev, one) } else { self.with_focused(app, |e| e.ime(&ev), one) };
         // The key that confirmed or cancelled a composition comes back up unheard.
