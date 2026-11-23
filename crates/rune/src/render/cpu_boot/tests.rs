@@ -37,7 +37,8 @@ fn render_gpu_bgra(gpu: &Gpu, instances: &[Instance], size: (u32, u32), clear: [
 
 #[test]
 fn backdrop_blur_cap_matches_gpu() {
-    let (w, h) = (256u32, 64u32);
+    // Wide enough for every blur below to sit on screen, 40 points apart.
+    let (w, h) = ((8 + 40 * (MAX_BACKDROP_BLURS + 2)).next_multiple_of(8) as u32, 64u32);
     let clear = Color { r: 0.05, g: 0.08, b: 0.12, a: 1.0 }.premul_srgb(1.0);
     let mut instances = Vec::new();
     // High-contrast vertical stripes so blurring vs not blurring produces a clear pixel delta.
