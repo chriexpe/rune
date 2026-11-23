@@ -160,3 +160,55 @@ fn children_of_an_exiting_parent_stop_hovering_and_pressing() {
     assert!(rt.core().hovered_alone().is_none(), "child of exiting parent must not claim hover_alone");
     assert!(rt.core().shared_hovered().is_empty(), "child of exiting parent must not light hover_group_shared");
 }
+
+/// R-025: a toolbar a row draws over the row above keeps its own row lit while the pointer
+/// is on it, and leaves the row above dark there (CSS `:hover` follows the element on top).
+/// Where the toolbar is unseen, the row above is lit as before.
+mod overhang {
+    use super::*;
+
+    struct S;
+
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        let row = |i: usize| {
+            let bar = el().key(format!("bar-{i}")).size(40.0, 20.0)
+                .absolute(150.0, -10.0)
+                .fill(Color::WHITE).on_press(|_: &mut S| {})
+                .group_opacity(0.0, 1.0);
+            col().key(format!("row-{i}")).w_full().h(40.0).hover_group().child(bar)
+        };
+        col().w_full().h_full().child(row(0)).child(row(1))
+    }
+
+    fn lit(rt: &Runtime<S>, key: &str) -> f32 {
+        let i = rt.tree.nodes.iter().position(|n| n.key.as_deref() == Some(key)).unwrap();
+        rt.scene.store().target(rt.tree.nodes[i].id, P_HOVER).unwrap_or(0.0)
+    }
+
+    fn at(rt: &mut Runtime<S>, x: f32, y: f32) {
+        rt.pointer_move(x, y);
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+    }
+
+    #[test]
+    fn the_overhanging_toolbar_keeps_its_row_lit_and_the_row_above_dark() {
+        let mut rt = Runtime::new(S, view, (240.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        // Row 1 (40..80) lit: its toolbar shows, overhanging row 0 at 30..50.
+        at(&mut rt, 20.0, 60.0);
+        assert_eq!((lit(&rt, "row-0"), lit(&rt, "row-1")), (0.0, 1.0));
+        // Onto the toolbar's half over row 0.
+        at(&mut rt, 170.0, 35.0);
+        assert_eq!((lit(&rt, "row-0"), lit(&rt, "row-1")), (0.0, 1.0), "the toolbar holds its row");
+    }
+
+    #[test]
+    fn where_the_toolbar_is_unseen_the_row_above_lights() {
+        let mut rt = Runtime::new(S, view, (240.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        // From row 0, the same point: row 1's toolbar is unseen, so takes nothing.
+        at(&mut rt, 20.0, 10.0);
+        at(&mut rt, 170.0, 35.0);
+        assert_eq!((lit(&rt, "row-0"), lit(&rt, "row-1")), (1.0, 0.0));
+    }
+}

@@ -178,7 +178,8 @@ impl RuntimeCore {
             Some(flips) => flips.iter().any(held),
             None => {
                 let (captured, alone, shared) = (self.captured(), self.hovered_alone(), self.shared_hovered());
-                (0..self.tree.nodes.len()).filter_map(|i| self.hover_flip(i, captured, alone, &shared)).any(|f| held(&f))
+                let groups = self.groups_under_pointer();
+                (0..self.tree.nodes.len()).filter_map(|i| self.hover_flip(i, captured, alone, &shared, &groups)).any(|f| held(&f))
             }
         }
     }
@@ -292,10 +293,32 @@ impl RuntimeCore {
     /// Node `i`'s hover track, if it has one and isn't leaving. `alone`: the `hover_alone`
     /// element under the pointer, which turns off the tracks of the elements around it.
     /// `shared`: the `hover_group_shared` keys the pointer is over.
-    fn hover_flip(&self, i: usize, captured: Option<&str>, alone: Option<usize>, shared: &[Rc<str>]) -> Option<Flip> {
+    /// The hover groups holding the topmost element under the pointer, innermost first: the
+    /// groups CSS `:hover` lights, as it lights an element's ancestors. Empty when the pointer
+    /// is on nothing that takes input, or on something no group holds.
+    fn groups_under_pointer(&self) -> Vec<usize> {
+        let Some(target) = self.pointer.pos.and_then(|(x, y)| self.top_target(x, y)) else { return Vec::new() };
+        std::iter::successors(Some(target), |&p| self.tree.nodes[p].parent)
+            .filter(|&p| self.tree.nodes[p].vis_flags.hover_group())
+            .collect()
+    }
+
+    /// Whether hover group `i` is under the pointer: its box holds the pointer, unless what
+    /// is on top there belongs to another group drawn over it (the next row's toolbar
+    /// overhanging this one); or what is on top there is its own, though drawn outside its
+    /// box (its toolbar overhanging the row above). `groups`: `groups_under_pointer`.
+    fn group_under_pointer(&self, i: usize, x: f32, y: f32, groups: &[usize]) -> bool {
+        if groups.contains(&i) { return true; }
+        let within = |inner: usize, outer: usize| std::iter::successors(Some(inner), |&p| self.tree.nodes[p].parent).any(|p| p == outer);
+        // Another group's content on top: one that neither holds `i` nor sits inside it.
+        let covered = groups.iter().any(|&g| !within(i, g) && !within(g, i));
+        self.node_contains(i, x, y) && !covered
+    }
+
+    fn hover_flip(&self, i: usize, captured: Option<&str>, alone: Option<usize>, shared: &[Rc<str>], groups: &[usize]) -> Option<Flip> {
         let n = &self.tree.nodes[i];
         if !(n.vis.hover().a > 0.0 || n.vis_flags.hover_group()) || self.subtree_exiting(i) { return None; }
-        let inside = self.pointer.pos.is_some_and(|(x, y)| self.node_contains(i, x, y))
+        let inside = self.pointer.pos.is_some_and(|(x, y)| if n.vis_flags.hover_group() { self.group_under_pointer(i, x, y, groups) } else { self.node_contains(i, x, y) })
             || n.vis.hover_share.as_ref().is_some_and(|k| shared.contains(k))
             || (n.vis_flags.hover_group() && self.keyboard_within(i));
         let capture_inside = if self.pointer.secondary.is_held() { inside } else { self.pointer.press.inside() };
@@ -330,12 +353,13 @@ impl RuntimeCore {
         let captured = self.pointer.press.path().or(self.pointer.secondary.path());
         let alone = self.hovered_alone();
         let shared = self.shared_hovered();
+        let groups = self.groups_under_pointer();
         for i in 0..self.tree.nodes.len() {
             let n = &self.tree.nodes[i];
             let press_scale = n.handlers.get().and_then(|h| h.press_scale);
             if n.vis.hover().a <= 0.0 && !n.vis_flags.hover_group() && !n.vis.tracks_press() && press_scale.is_none() { continue; }
             if self.subtree_exiting(i) { continue; }
-            match self.hover_flip(i, captured, alone, &shared) {
+            match self.hover_flip(i, captured, alone, &shared, &groups) {
                 Some(f) if f.changed => flips.push(f),
                 // Default hover animations inherit velocity and have no completion token.
                 // An unchanged target preserves its trajectory in the store already; avoid
