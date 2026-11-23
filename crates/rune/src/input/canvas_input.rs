@@ -213,4 +213,10 @@ impl Tx {
     /// [`El::pointer_buttons`]; in `on_link`, `Middle` for a middle click on the link; in
     /// [`El::on_middle_press`], `Middle`. Other handlers see `Primary`.
     pub fn button(&self) -> PointerButton { self.button }
+
+    /// In `on_link`, the box of the activated link's first drawn line, in window points
+    /// (left, top, width, height), so what the link opens (a card, a popover) can sit beside
+    /// it as it would beside an element; a press and Enter or Space on a focused link alike.
+    /// `None` in every other handler, and for a link not drawn this frame.
+    pub fn link_rect(&self) -> Option<[f32; 4]> { self.link_rect }
 }
