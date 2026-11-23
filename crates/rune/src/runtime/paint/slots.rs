@@ -35,7 +35,7 @@ pub(in crate::runtime) fn push_effect(instances: &mut Vec<Instance>, (effect, ma
 /// `radii` (continuous when `continuous`), cut by `clip`, the soft edges `fade` from
 /// `fade_origin` and an ancestor's rounded clip `rounded`, at `k_px` device pixels per point and
 /// opacity `o`. Returns the signed corner radius an outer shadow leaves clear over the blur.
-pub(in crate::runtime) fn push_backdrop_blur(instances: &mut Vec<Instance>, sigma: f32, (rect, radii, continuous): ([f32; 4], [f32; 4], bool),
+pub(in crate::runtime) fn push_backdrop_blur(instances: &mut Vec<Instance>, (sigma, saturate): (f32, f32), (rect, radii, continuous): ([f32; 4], [f32; 4], bool),
     (clip, fade, fade_origin): ([f32; 4], [f32; 4], [f32; 4]), rounded: Option<([f32; 4], [f32; 4])>, k_px: f32, o: f32) -> f32 {
     // One clip rectangle fits the packed ABI: a rounded clip cut by `clip` keeps only the cut.
     let (clip, round) = match rounded {
@@ -48,7 +48,7 @@ pub(in crate::runtime) fn push_backdrop_blur(instances: &mut Vec<Instance>, sigm
         radii: if continuous { radii.map(|v| -v) } else { radii },
         fill: [0.0, 0.0, 0.0, o],
         border: [0.0; 4],
-        params: [sigma * k_px, KIND_BACKDROP_BLUR, 0.0, k_px],
+        params: [sigma * k_px, KIND_BACKDROP_BLUR, saturate, k_px],
         uv: [0.0; 4],
         clip,
         fade: crate::render::pack_fade(fade, fade_origin, clip),
