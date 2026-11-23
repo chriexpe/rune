@@ -103,6 +103,8 @@ pub struct Tx {
     pub(crate) window_frame: Option<crate::window::frame::FrameRequest>,
     /// The mouse button driving this press or drag (`Tx::button`).
     pub(crate) button: crate::PointerButton,
+    /// `Tx::link_rect`: in `on_link`, the pressed link's first line box.
+    pub(crate) link_rect: Option<[f32; 4]>,
     pub(crate) touch_tap: bool,
     /// Modifier keys held as the handler runs.
     pub(crate) mods: crate::Mods,

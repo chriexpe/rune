@@ -426,6 +426,10 @@ impl RuntimeCore {
             Some((t.cold.on_link.clone()?, t.cold.links.get(k)?.id.clone()))
         }) else { return false };
         log_event!(self, "link {path} {id}");
+        tx.link_rect = self.tree.nodes.iter().position(|n| n.path == path).and_then(|i| {
+            let (_, [x0, y0, x1, y1]) = self.link_boxes(i, self.drawn_box(i)).into_iter().find(|(j, _)| *j == k)?;
+            Some([x0, y0, x1 - x0, y1 - y0])
+        });
         (f.0)(app.states(), &id, tx);
         true
     }

@@ -207,6 +207,8 @@ mod grid_tests;
 #[cfg(test)]
 mod truncate_tests;
 #[cfg(test)]
+mod link_rect_tests;
+#[cfg(test)]
 mod truncate_fade_tests;
 #[cfg(test)]
 mod line_clamp_tests;
