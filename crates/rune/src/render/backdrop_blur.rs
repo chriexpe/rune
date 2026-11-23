@@ -8,8 +8,11 @@ use bytemuck::{Pod, Zeroable};
 
 use super::*;
 
-/// Backdrop-blurred elements per frame. Elements past this many draw only their fill.
-pub const MAX_BACKDROP_BLURS: usize = 4;
+/// Backdrop-blurred elements per frame. Elements past this many draw only their fill. An app
+/// whose floating controls are glass (title and action pills, a composer, round buttons, an open
+/// menu and panel) passes four in one frame; each record costs one pass split and a blur of its
+/// own region, and its uniforms take `SLOTS * SLOT` bytes (2 KiB).
+pub const MAX_BACKDROP_BLURS: usize = 16;
 
 /// Pyramid levels below the backdrop, the first at half resolution.
 pub(in crate::render) const MIPS: u32 = 7;
