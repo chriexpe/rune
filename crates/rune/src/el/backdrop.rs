@@ -38,4 +38,19 @@ impl El {
         }
         self
     }
+
+    /// Saturates the blurred backdrop by `factor` before the fill tints it, as CSS
+    /// `backdrop-filter: blur() saturate()`: 1 leaves its colours, above 1 strengthens them
+    /// (frosted glass usually takes 1.5 to 1.8), 0 makes it grey. Has no effect without
+    /// `El::backdrop_blur`.
+    pub fn backdrop_saturate(mut self, factor: f32) -> Self {
+        let f = if factor.is_finite() { factor.max(0.0) } else { 1.0 };
+        // Stored as given; 0 in storage means "unchanged", so a grey backdrop keeps a
+        // hair above it.
+        let stored = if f == 1.0 { 0.0 } else { f.max(1e-6) };
+        if stored != 0.0 || !self.vis.cold.is_empty() {
+            self.vis.cold_mut().backdrop_saturate = stored;
+        }
+        self
+    }
 }

@@ -67,6 +67,11 @@ pub(in crate::render) struct Plan {
 
 /// Plans one backdrop blur record's region, aligned origin, start level and minimum pyramid size,
 /// or returns `None` when its region is empty.
+/// A blur record's saturation (`El::backdrop_saturate`), 1 when it sets none.
+pub(in crate::render) fn saturation(i: &Instance) -> f32 {
+    if i.params[2] > 0.0 { i.params[2] } else { 1.0 }
+}
+
 pub(in crate::render) fn plan_region(i: &Instance, viewport: (u32, u32)) -> Option<Plan> {
     let sigma = i.params[0];
     let (n, share) = levels(sigma, MIPS as usize - 1);
@@ -452,7 +457,7 @@ impl Renderer {
         for (at, i) in records {
             let Some(plan) = plan_region(i, (vw, vh)) else { continue };
             for k in 0..2 { need[k] = need[k].max(plan.size[k]); }
-            placed.push((*at, plan.levels, plan.share, plan.region, plan.origin));
+            placed.push((*at, plan.levels, plan.share, plan.region, plan.origin, saturation(i)));
         }
         if placed.is_empty() { return; }
         // The window plus the most an aligned origin can sit before it.
@@ -461,7 +466,7 @@ impl Renderer {
         let Some(pyramid) = &blur.pyramid else { return };
         let extent = [pyramid.size[0] as f32 * 2.0, pyramid.size[1] as f32 * 2.0];
         let mut levels_data = vec![0u8; MAX_BACKDROP_BLURS * SLOTS * SLOT as usize];
-        for (slot, (at, n, share, region, origin)) in placed.into_iter().enumerate() {
+        for (slot, (at, n, share, region, origin, saturate)) in placed.into_iter().enumerate() {
             let inside = [(region[0] - origin[0]) / extent[0], (region[1] - origin[1]) / extent[1],
                 (region[2] - origin[0]) / extent[0], (region[3] - origin[1]) / extent[1]];
             let place = [origin[0], origin[1], extent[0], extent[1]];
@@ -473,7 +478,8 @@ impl Renderer {
                 } else {
                     (inside, [1.0, 1.0, 0.0, 0.0])
                 };
-                let level = Level { w: [if m + 1 == n { share } else { 1.0 }, 0.0, 0.0, 0.0], region, map, place };
+                // Level 0 is the slot the composite reads; its `w.y` is the saturation.
+                let level = Level { w: [if m + 1 == n { share } else { 1.0 }, if m == 0 { saturate } else { 1.0 }, 0.0, 0.0], region, map, place };
                 let at = (slot * SLOTS + m) * SLOT as usize;
                 levels_data[at..at + std::mem::size_of::<Level>()].copy_from_slice(bytemuck::bytes_of(&level));
             }

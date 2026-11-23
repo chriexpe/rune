@@ -222,5 +222,9 @@ pub(super) fn composite(b: &Blurred, i: &Instance, clip: &Clip, p: [f32; 2]) -> 
     let d = sd_rounded([p[0] - i.rect[0] - half[0], p[1] - i.rect[1] - half[1]], half, i.radii);
     let cov = (0.5 - d).clamp(0.0, 1.0) * clip.alpha(p) * i.fill[3];
     let col = b.up.sample([(p[0] - b.place[0]) / b.place[2], (p[1] - b.place[1]) / b.place[3]]);
-    col.map(|v| v * cov)
+    // `El::backdrop_saturate`, as the GPU composite does it.
+    let s = crate::render::backdrop_blur::saturation(i);
+    let luma = 0.2126 * col[0] + 0.7152 * col[1] + 0.0722 * col[2];
+    let mix = |v: f32| (luma + (v - luma) * s).max(0.0);
+    [mix(col[0]), mix(col[1]), mix(col[2]), col[3]].map(|v| v * cov)
 }

@@ -65,5 +65,8 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     let d = sd_rounded(i.p - (i.rect.xy + half), half, i.radii);
     let cov = clamp(0.5 - d, 0.0, 1.0) * clip_alpha(i.p, i.clip, i.fade) * i.alpha;
     let col = textureSampleLevel(blurred, smp, (i.p - u.place.xy) / u.place.zw, 0.0);
-    return col * cov;
+    // `El::backdrop_saturate`, as CSS `saturate()`: towards or away from the luma.
+    let luma = dot(col.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let rgb = max(mix(vec3<f32>(luma), col.rgb, u.w.y), vec3<f32>(0.0));
+    return vec4<f32>(rgb, col.a) * cov;
 }

@@ -84,6 +84,51 @@ fn backdrop_blur_cap_matches_gpu() {
 }
 
 #[test]
+fn a_saturated_backdrop_blur_greys_alike_on_the_cpu_and_the_gpu() {
+    // `El::backdrop_saturate(0.0)`, stored a hair above 0: the blur behind the record turns
+    // grey, on the CPU boot path as on the GPU.
+    let (w, h) = (128u32, 64u32);
+    let clear = Color { r: 0.05, g: 0.08, b: 0.12, a: 1.0 }.premul_srgb(1.0);
+    let mut instances = Vec::new();
+    for x in (0..w).step_by(8) {
+        let color = if (x / 8) % 2 == 0 {
+            Color { r: 0.9, g: 0.15, b: 0.1, a: 1.0 }.premul_srgb(1.0)
+        } else {
+            Color { r: 0.1, g: 0.85, b: 0.25, a: 1.0 }.premul_srgb(1.0)
+        };
+        instances.push(rect([x as f32, 0.0, 8.0, h as f32], color, NO_CLIP));
+    }
+    instances.push(Instance {
+        rect: [16.0, 8.0, 96.0, 48.0],
+        radii: [4.0; 4],
+        fill: [0.0, 0.0, 0.0, 1.0],
+        border: [0.0; 4],
+        params: [8.0, KIND_BACKDROP_BLUR, 1e-6, 1.0],
+        uv: [0.0; 4],
+        clip: NO_CLIP,
+        fade: [0; 4],
+    });
+    let atlas = Atlas::new();
+    let images = ImageAtlas::default();
+    let gpu = Gpu::headless();
+    let half = HalfRounding::of_vendor(gpu.adapter.get_info().vendor);
+    let scene = Scene::new(&instances, &atlas, &images, (w, h), clear).srgb_blend(true).half_rounding(half);
+    let mut cpu_px = vec![0u8; (w * h * 4) as usize];
+    paint(&scene, &mut Target::new(&mut cpu_px, w, h), 1).expect("CPU paints the backdrop blur");
+    let gpu_px = render_gpu_bgra(&gpu, &instances, (w, h), clear);
+    for px in [&cpu_px, &gpu_px] {
+        let at = ((32 * w + 64) * 4) as usize;
+        let (b, g, r) = (i32::from(px[at]), i32::from(px[at + 1]), i32::from(px[at + 2]));
+        assert!((r - g).abs() <= 2 && (g - b).abs() <= 2, "grey inside the record: {r} {g} {b}");
+    }
+    let d = drift(
+        Pixels::bgra(&cpu_px, w, h, w as usize * 4),
+        Pixels::bgra(&gpu_px, w, h, w as usize * 4),
+    );
+    assert_eq!(d.over_two, 0, "CPU and GPU saturated blurs drifted: {d:?}");
+}
+
+#[test]
 fn scissor_clipped_layer_flattens_and_matches_gpu() {
     let (w, h) = (128u32, 64u32);
     let clear = Color { r: 0.08, g: 0.1, b: 0.14, a: 1.0 }.premul_srgb(1.0);
