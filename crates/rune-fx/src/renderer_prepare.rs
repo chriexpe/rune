@@ -76,7 +76,7 @@ impl FxRenderer {
             let needs_bd = layer.fx.needs_backdrop() || slot.blend.needs_backdrop();
             stats.needs_backdrop |= needs_bd;
             let blur_px = match layer.fx {
-                Fx::Distort(DistortParams::Lens(p)) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
+                Fx::Distort(DistortParams::Lens(p)) => p.frost_blur_pt() * s,
                 Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
                 _ => 0.0,
             };

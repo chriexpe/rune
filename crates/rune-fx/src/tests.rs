@@ -328,3 +328,13 @@ fn wgsl_uniform_and_storage_layouts_match_rust() {
         &[("P", std::mem::size_of::<SimUniform>(), sim_fields)],
     );
 }
+
+#[test]
+fn a_lens_frosts_with_its_own_sigma_and_defaults_to_the_old_one() {
+    let lens = |frost, frost_sigma| LensParams { frost, frost_sigma, ..Default::default() };
+    assert_eq!(LensParams::default().frost_sigma, 18.0, "every lens before frosts as it did");
+    assert_eq!(lens(1.0, 32.0).frost_blur_pt(), 32.0);
+    assert_eq!(lens(0.5, 32.0).frost_blur_pt(), 16.0);
+    assert_eq!(lens(1.7, 32.0).frost_blur_pt(), 32.0, "frost held to 0..1");
+    assert_eq!(lens(1.0, -4.0).frost_blur_pt(), 0.0);
+}
