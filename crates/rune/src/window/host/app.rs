@@ -37,6 +37,8 @@ pub(crate) trait WindowApp {
     fn enter_turn(&mut self) -> bool;
     fn leave_turn(&mut self);
     fn run_on_close(&mut self);
+    /// `App::on_close_request`: true keeps the window open.
+    fn run_on_close_request(&mut self) -> bool;
     fn run_on_quit(&mut self) -> bool;
     fn run_on_rest(&mut self);
     fn queue_on_reopen(&mut self, has_visible_windows: bool) -> Option<Arc<AtomicBool>>;
@@ -187,6 +189,7 @@ pub(in crate::window) fn test_app<S: 'static>(
         comp: None,
         on_frame_drawn: None,
         on_close,
+        on_close_request: None,
         on_rest: None,
         on_quit,
         on_reopen: None,
@@ -203,6 +206,7 @@ pub(crate) struct TypedWindowApp<S: 'static> {
     pub(super) comp: Option<Box<dyn Compositor<S>>>,
     pub(super) on_frame_drawn: Option<OnFrameDrawn<S>>,
     pub(super) on_close: Option<fn(&mut S, &mut Tx)>,
+    pub(super) on_close_request: Option<fn(&mut S, &mut Tx) -> bool>,
     pub(super) on_rest: Option<fn(&mut S, &mut Tx) -> bool>,
     pub(super) on_quit: Option<fn(&mut S, &mut Tx)>,
     pub(super) on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
@@ -216,13 +220,14 @@ impl<S: 'static> TypedWindowApp<S> {
     #[cfg(all(test, feature = "hot"))]
     pub(crate) fn from_app(mut app: crate::App<S>, waker: crate::runtime::Waker) -> Self {
         let (on_close, on_rest, on_reopen, on_quit, turn_scope) = (app.on_close, app.on_rest, app.on_reopen, app.on_quit, app.turn_scope);
+        let on_close_request = app.on_close_request;
         let comp = app.compositor.take();
         let (layout_seed, keep_layout) = (app.layout_seed.take(), app.keep_layout.take());
         let (spec, state, shared, runtime) = app.into_parts(None);
         let mut rt = crate::tooling::runtime_for(&spec, state, spec.size, crate::runtime::Env::default(), waker);
         rt.configure(runtime);
         Self {
-            rt, shared, comp, on_frame_drawn: None, on_close, on_rest, on_quit, on_reopen, turn_scope,
+            rt, shared, comp, on_frame_drawn: None, on_close, on_close_request, on_rest, on_quit, on_reopen, turn_scope,
             keep_layout, kept_layout: layout_seed,
         }
     }
@@ -274,6 +279,13 @@ impl<S: 'static> WindowApp for TypedWindowApp<S> {
             #[cfg(not(feature = "hot"))]
             self.rt.update(f);
         }
+    }
+
+    fn run_on_close_request(&mut self) -> bool {
+        let Some(f) = self.on_close_request else { return false };
+        let mut keep = false;
+        self.rt.update(|s, tx| keep = f(s, tx));
+        keep
     }
 
     fn run_on_quit(&mut self) -> bool {
@@ -380,4 +392,58 @@ impl<S: 'static> WindowApp for TypedWindowApp<S> {
     fn text_idle_owed(&self) -> bool { self.rt.text_idle_owed() }
 
     fn text_idle_turn(&mut self) -> bool { self.rt.text_idle_turn() }
+}
+
+#[cfg(test)]
+mod close_request_tests {
+    //! `App::on_close_request` decides whether a close request closes.
+    use std::sync::Arc;
+
+    use super::{Shared, TypedWindowApp, WindowApp};
+    use crate::runtime::{Env, Runtime};
+    use crate::{Cx, El, Tx, el};
+
+    #[derive(Default)]
+    struct Asking {
+        busy: bool,
+        asked: bool,
+    }
+
+    fn view(_: &Asking, _: &mut Cx<Asking>) -> El { el() }
+
+    fn keep_while_busy(s: &mut Asking, _: &mut Tx) -> bool {
+        s.asked = s.busy;
+        s.busy
+    }
+
+    fn app(busy: bool, hook: Option<fn(&mut Asking, &mut Tx) -> bool>) -> TypedWindowApp<Asking> {
+        let rt = Runtime::new(Asking { busy, asked: false }, view, (100.0, 100.0), Env::default());
+        TypedWindowApp {
+            rt,
+            shared: Arc::new(Shared::default()),
+            comp: None,
+            on_frame_drawn: None,
+            on_close: None,
+            on_close_request: hook,
+            on_rest: None,
+            on_quit: None,
+            on_reopen: None,
+            turn_scope: None,
+            keep_layout: None,
+            kept_layout: None,
+        }
+    }
+
+    #[test]
+    fn a_hook_that_keeps_the_window_runs_and_says_so() {
+        let mut app = app(true, Some(keep_while_busy));
+        assert!(app.run_on_close_request());
+        assert!(app.rt.state.asked);
+    }
+
+    #[test]
+    fn a_hook_that_lets_it_go_and_no_hook_both_close() {
+        assert!(!app(false, Some(keep_while_busy)).run_on_close_request());
+        assert!(!app(true, None).run_on_close_request());
+    }
 }

@@ -64,6 +64,7 @@ pub struct App<S: 'static> {
     pub(crate) standard_menus: bool,
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
+    pub(crate) on_close_request: Option<fn(&mut S, &mut Tx) -> bool>,
     pub(crate) on_quit: Option<fn(&mut S, &mut Tx)>,
     pub(crate) turn_scope: Option<TurnScope<S>>,
     pub(crate) on_rest: Option<fn(&mut S, &mut Tx) -> bool>,
@@ -127,6 +128,7 @@ impl<S: 'static> App<S> {
             standard_menus: false,
             keep_running: false,
             on_close: None,
+            on_close_request: None,
             on_quit: None,
             turn_scope: None,
             on_rest: None,
@@ -554,6 +556,16 @@ impl<S: 'static> App<S> {
     /// Its `Tx::quit` quits.
     pub fn on_close(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_close = Some(f);
+        self
+    }
+
+    /// Runs when someone asks to close the window (its close button, the window manager's close
+    /// or Alt+F4), before anything closes: return true to keep it open, as an app asks about
+    /// unsaved work or a transfer still running, and show the question; close it later with
+    /// [`Tx::close_window`], which doesn't ask again. False closes as usual (`on_close` runs).
+    /// Not asked for [`Tx::close_window`], `AppHandle::close` or a quit. Native windows only.
+    pub fn on_close_request(mut self, f: fn(&mut S, &mut Tx) -> bool) -> Self {
+        self.on_close_request = Some(f);
         self
     }
 

@@ -291,6 +291,12 @@ impl Host {
                 if self.life.finished() || self.win.is_none() { return; }
             }
             WindowEvent::CloseRequested => {
+                // The app may keep the window to ask first (`App::on_close_request`); the
+                // turn then runs as for any input, so the question draws.
+                if self.app.run_on_close_request() {
+                    self.shell(event_loop);
+                    return;
+                }
                 self.close(event_loop);
                 return;
             }
