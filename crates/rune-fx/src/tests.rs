@@ -328,3 +328,17 @@ fn wgsl_uniform_and_storage_layouts_match_rust() {
         &[("P", std::mem::size_of::<SimUniform>(), sim_fields)],
     );
 }
+
+#[test]
+fn a_lens_veil_rides_in_the_tint_and_defaults_to_none() {
+    let veiled = |veil| {
+        let (_, i, _) = Fx::lens(LensParams { tint: rgb(0x26292e), veil, ..Default::default() }).on(card()).pack().unwrap();
+        i.c0
+    };
+    let c0 = veiled(0.6);
+    assert_eq!(&c0[..3], &rgb(0x26292e).0[..], "the veil's colour is the tint");
+    assert_eq!(c0[3], 0.6);
+    assert_eq!(veiled(1.7)[3], 1.0, "clamped");
+    let (_, plain, _) = Fx::lens(LensParams::default()).on(card()).pack().unwrap();
+    assert_eq!(plain.c0[3], 0.0, "no veil unless asked: every existing lens draws as before");
+}

@@ -4,6 +4,7 @@
 // heat:   p0 (height pt, scale pt, speed, amount pt)  p1 (full rect 0/1, _, _, _)
 // shock:  p0 (reach pt, width pt, amount pt, chroma)  p1 (t0, duration, _, _)  aux: origin
 // lens:   p0 (bevel pt, depth pt, dispersion, magnification)  p1 (presence, frost, shadow, rim)
+//         c0 (tint rgb, veil)
 //         p2 (light angle rad, tint, union k pt, radius B)  p3 rect B (w = 0: none)  shape.w morph A->B
 //         c0 tint
 // crt:    p0 (bulge, scanline period pt, scanline depth, chroma pt)  p1 (vignette, glow, roll, feather)
@@ -151,6 +152,8 @@ fn shade(in: VOut) -> vec4f {
             }
         }
         col = mix(col, col * i.c0.rgb, i.p2.y * presence);
+        // Veil: the tint laid over the refracted backdrop, under the rim's light.
+        col = mix(col, i.c0.rgb, i.c0.a * presence);
         // Light: sky sheen, crisp specular where the rim faces the light, a fainter counter-line, hairline.
         let la = i.p2.x;
         let L = vec2f(cos(la), sin(la));
