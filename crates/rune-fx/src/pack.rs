@@ -283,7 +283,8 @@ impl FxLayer {
                     }
                     DistortParams::Lens(l) => {
                         i.t[2] = 2.0;
-                        i.c0 = l.tint.v4();
+                        let [red, green, blue] = l.tint.0;
+                        i.c0 = [red, green, blue, l.veil.clamp(0.0, 1.0)];
                         i.p0 = [l.bevel, l.depth, l.dispersion, l.magnification];
                         i.p1 = [l.presence.clamp(0.0, 1.0), l.frost, l.shadow, l.rim];
                         let mut b = r;
