@@ -118,7 +118,8 @@ const KIND_EXTRAS: usize = 6;
 pub(crate) const KIND_FILL: usize = 7;
 pub(crate) const KINDS: usize = 8;
 
-/// Blur sigma (pt) of a fully frosted lens (`LensParams::frost = 1`).
+/// Blur sigma (pt) of a fully frosted lens (`LensParams::frost = 1`) by default, and of
+/// fluted glass.
 pub(crate) const LENS_FROST_SIGMA: f32 = 18.0;
 
 /// Calm pose for looping noise effects under reduced motion: frozen at a fixed, pleasant time.

@@ -375,7 +375,11 @@ pub struct LensParams {
     pub magnification: f32,
     /// 0..1: glass materialises by lensing (refraction, rim and shadow ramp together), not fading.
     pub presence: f32,
+    /// 0..1: how frosted, as a share of `frost_sigma`.
     pub frost: f32,
+    /// The blur sigma (pt) of a fully frosted lens (`frost` = 1). The backdrop pyramid reaches
+    /// about 64 device pixels; more blurs no further.
+    pub frost_sigma: f32,
     pub shadow: f32,
     pub rim: f32,
     pub light_angle: f32,
@@ -392,6 +396,13 @@ pub struct LensParams {
     pub morph: f32,
 }
 
+impl LensParams {
+    /// The blur sigma (pt) this lens frosts with.
+    pub(crate) fn frost_blur_pt(&self) -> f32 {
+        self.frost.clamp(0.0, 1.0) * self.frost_sigma.max(0.0)
+    }
+}
+
 impl Default for LensParams {
     fn default() -> Self {
         LensParams {
@@ -401,6 +412,7 @@ impl Default for LensParams {
             magnification: 1.04,
             presence: 1.0,
             frost: 0.0,
+            frost_sigma: crate::pack::LENS_FROST_SIGMA,
             shadow: 0.35,
             rim: 1.6,
             light_angle: -2.09,
