@@ -72,7 +72,10 @@ struct BlurPyramid {
 }
 
 const BLUR_MIPS: u32 = 6;
-const BLUR_SLOTS: usize = 64;
+/// Blur passes a frame may run, each one 256-byte uniform slot: a frosted lens takes one per
+/// pyramid level (up to `BLUR_MIPS`), so 128 frost about 21 lenses a frame, a UI's floating
+/// pills, menus and panels together.
+const BLUR_SLOTS: usize = 128;
 
 /// Group 1's resources: backdrop, source and blurred backdrop views, and the backdrop encoding.
 pub(crate) type Fx1Key = ([wgpu::TextureView; 3], usize);
