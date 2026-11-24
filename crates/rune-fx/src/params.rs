@@ -380,7 +380,11 @@ pub struct LensParams {
     pub rim: f32,
     pub light_angle: f32,
     pub tint: Rgb,
+    /// 0..1: how far `tint` multiplies what the lens shows (coloured glass).
     pub tint_amount: f32,
+    /// 0..1: how far what the lens shows is mixed towards `tint` itself, a veil of the colour
+    /// over the refracted backdrop (UI glass that text sits on), under the rim's light.
+    pub veil: f32,
     /// A second glass shape smooth-unioned with the first (gooey merge), or `None`.
     pub second: Option<Shape>,
     pub union_k: f32,
@@ -402,6 +406,7 @@ impl Default for LensParams {
             light_angle: -2.09,
             tint: rgb(0xffffff),
             tint_amount: 0.0,
+            veil: 0.0,
             second: None,
             union_k: 22.0,
             morph: 0.0,
