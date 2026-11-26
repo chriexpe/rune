@@ -1,15 +1,16 @@
 # rune-notify
 
 System notifications for Rune apps: `UNUserNotificationCenter` on macOS, toast notifications on
-Windows, and the desktop's notification server (`org.freedesktop.Notifications` on the session
-bus) on Linux. Elsewhere `available()` is false and every call does nothing. Notifications are
-silent.
+Windows, and desktop notifications on Linux. Elsewhere `available()` is false and every call
+does nothing.
 
 On Linux the first `available()`, `post` or `remove` connects to the session bus and waits up to
-about 2.5 s for a notification server, so make it after the first frame (`on_ready`). The
-XDG portal (`org.freedesktop.portal.Notification`) is not used: a sandboxed app needs permission
-to talk to `org.freedesktop.Notifications` (Flatpak: `--talk-name=org.freedesktop.Notifications`).
-Buttons post where the server shows actions; text boxes (`Notification::reply`) are left out.
+about 2.5 s for the service, so make it after the first frame (`on_ready`). In Flatpak it uses the
+XDG Notification portal (`org.freedesktop.portal.Notification`); outside Flatpak it uses
+`org.freedesktop.Notifications`. Buttons post where the service shows actions; text boxes
+(`Notification::reply`) are left out. FDO and portal v2 or newer receive a silence hint by default,
+or a sound hint with `Notification::sound(true)`. Portal v1 leaves sound up to the server,
+and older backends behind a v2 portal may ignore the hint.
 
 | Call | What it does |
 | --- | --- |

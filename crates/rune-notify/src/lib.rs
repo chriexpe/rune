@@ -9,17 +9,17 @@
 //!   posts before either. With an activation scheme (`Identity::activation`) a click
 //!   opens a link on that scheme, which reaches the app whether it runs or not, as long as the
 //!   toast is in the notification center; `click_from_url` turns the link back into the click.
-//! - **Linux:** the desktop's notification server (`org.freedesktop.Notifications` on the session
-//!   bus), on its own connection and thread. `available` is whether one answered; the first call
-//!   connects, waiting up to about 2.5 s for a server to answer, so make it after the first
-//!   frame (`on_ready`). The XDG portal is not used: a sandboxed app needs permission to talk to
-//!   `org.freedesktop.Notifications`. Buttons post where the server shows actions; text boxes
+//! - **Linux:** the XDG Notification portal (`org.freedesktop.portal.Notification`) in Flatpak,
+//!   or `org.freedesktop.Notifications` on the session bus outside Flatpak. The first call waits
+//!   up to about 2.5 s for the service to answer, so make it after the first frame (`on_ready`).
+//!   Buttons post where the service shows actions; text boxes
 //!   (`Notification::reply`) are left out. A click comes back while the process that posted
 //!   runs, with the server's activation token (`Click::activation_token`) when it sends one.
 //!   `register` names the app and its desktop entry.
 //! - **Elsewhere:** `available` is false and every call does nothing.
 //!
-//! Notifications are silent: they never play a sound.
+//! Notifications are silent by default where the backend can set a sound hint. On Linux,
+//! [`Notification::sound`] can opt into the default notification sound.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -40,6 +40,8 @@ pub struct Notification {
     info: Vec<(String, String)>,
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos", target_os = "windows")), allow(dead_code))]
     actions: Vec<Action>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    sound: bool,
 }
 
 /// A button on a notification, or a text box with its send button.
@@ -81,6 +83,13 @@ impl Notification {
     /// none on one without actions. Elsewhere the notification posts without them.
     pub fn action(mut self, id: impl Into<String>, label: impl Into<String>) -> Self {
         self.actions.push(Action::Button { id: id.into(), label: label.into() });
+        self
+    }
+
+    /// Whether to request the desktop's default notification sound (off by default).
+    /// Only Linux supports the hint; version 1 of the XDG portal leaves sound to the server.
+    pub fn sound(mut self, sound: bool) -> Self {
+        self.sound = sound;
         self
     }
 

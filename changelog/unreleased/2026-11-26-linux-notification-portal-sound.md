@@ -1,0 +1,1 @@
+- `rune-notify` uses the XDG Notification portal in Flatpak. `Notification::sound(true)` opts into sound on the Linux desktop notification server and on version 2 or newer of the portal.

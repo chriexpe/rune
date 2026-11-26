@@ -1,8 +1,6 @@
-//! Linux: the desktop's notification server, `org.freedesktop.Notifications` on the session bus,
-//! on its own connection and thread. The first call connects and asks the server for its
-//! capabilities; `available` is whether one answered. Rune ids map to the server's numeric ids,
-//! so posting an id again replaces its notification, and a click (`ActionInvoked`) comes back
-//! with the id and user info it was posted with.
+//! Linux notifications on a worker thread: the XDG portal in Flatpak, otherwise the desktop's
+//! `org.freedesktop.Notifications`. The first call probes the service to determine availability.
+//! Reposting an id replaces its notification; clicks come back with the id and its user info.
 use super::{ACTION, Action, Click, Notification, TOKEN, deliver};
 use async_channel::{Receiver, Sender, unbounded};
 use futures_lite::{FutureExt, StreamExt};
@@ -10,6 +8,10 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use zbus::{Connection, MatchRule, MessageStream, Proxy, message::Type, zvariant::Value};
+
+mod portal;
+#[cfg(test)]
+mod roundtrip_tests;
 
 const NAME: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
@@ -122,34 +124,96 @@ enum Event {
 }
 
 async fn run(commands: Receiver<Command>, ready: mpsc::SyncSender<bool>) {
+    let transport = Transport::detect(
+        std::env::var_os("FLATPAK_ID").as_deref(),
+        std::path::Path::new("/.flatpak-info").exists(),
+    );
+    run_on(Connection::session(), transport, commands, ready, deliver).await;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Fdo,
+    Portal,
+}
+
+impl Transport {
+    fn detect(flatpak_id: Option<&std::ffi::OsStr>, flatpak_info: bool) -> Self {
+        if flatpak_info || flatpak_id.is_some_and(|id| !id.is_empty()) {
+            Self::Portal
+        } else {
+            Self::Fdo
+        }
+    }
+}
+
+async fn run_on(
+    connect: impl Future<Output = zbus::Result<Connection>>,
+    transport: Transport,
+    commands: Receiver<Command>,
+    ready: mpsc::SyncSender<bool>,
+    deliver: impl Fn(Click),
+) {
+    match transport {
+        Transport::Fdo => run_fdo(connect, commands, ready, deliver).await,
+        Transport::Portal => portal::run(connect, commands, ready, deliver).await,
+    }
+}
+
+async fn notification_signals(
+    conn: &Connection,
+    name: &str,
+    path: &str,
+    interface: &str,
+) -> zbus::Result<MessageStream> {
+    let rule = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender(name)?
+        .interface(interface)?
+        .path(path)?
+        .build();
+    MessageStream::for_match_rule(rule, conn, None).await
+}
+
+async fn next_event(commands: &Receiver<Command>, signals: &mut MessageStream) -> Event {
+    async { Event::Command(commands.recv().await.ok()) }
+        .or(async { Event::Signal(signals.next().await) })
+        .await
+}
+
+async fn run_fdo(
+    connect: impl Future<Output = zbus::Result<Connection>>,
+    commands: Receiver<Command>,
+    ready: mpsc::SyncSender<bool>,
+    deliver: impl Fn(Click),
+) {
     let setup = async {
-        let conn = Connection::session().await?;
+        let conn = connect.await?;
         let proxy = Proxy::new(&conn, NAME, PATH, NAME).await?;
         // One stream for every signal, so `ActivationToken` stays ahead of its `ActionInvoked`;
         // only the server's, so no other peer on the bus can fake a click.
-        let rule = MatchRule::builder().msg_type(Type::Signal).sender(NAME)?.interface(NAME)?.path(PATH)?.build();
-        let signals = MessageStream::for_match_rule(rule, &conn, None).await?;
+        let signals = notification_signals(&conn, NAME, PATH, NAME).await?;
         let caps: Vec<String> = proxy.call("GetCapabilities", &()).await?;
-        Ok::<_, zbus::Error>((conn, proxy, signals, Caps::from_list(&caps)))
+        Ok::<_, zbus::Error>((proxy, signals, Caps::from_list(&caps)))
     };
-    let Some(Ok((_conn, proxy, mut signals, caps))) = timeout(PROBE_TIMEOUT, setup).await else {
+    let Some(Ok((proxy, mut signals, caps))) = timeout(PROBE_TIMEOUT, setup).await else {
         ready.send(false).ok();
         return;
     };
     ready.send(true).ok();
     let mut shown: HashMap<String, Shown> = HashMap::new();
     loop {
-        let event = async { Event::Command(commands.recv().await.ok()) }
-            .or(async { Event::Signal(signals.next().await) })
-            .await;
-        match event {
+        match next_event(&commands, &mut signals).await {
             Event::Command(None) => return,
             Event::Command(Some(Command::Post(post))) => {
                 let replaces = shown.get(&post.n.id).map_or(0, |s| s.server);
                 let actions = actions_for(&post.n, caps);
                 let body = body_for(&post.n.body, caps);
                 let mut hints: HashMap<&str, Value> = HashMap::new();
-                hints.insert("suppress-sound", Value::from(true));
+                hints.insert("suppress-sound", Value::from(!post.n.sound));
+                if post.n.sound {
+                    hints.insert("sound-name", Value::from("message-new-instant"));
+                }
                 if let Some(entry) = post.desktop_entry.as_deref() {
                     hints.insert("desktop-entry", Value::from(entry));
                 }
@@ -182,7 +246,12 @@ async fn run(commands: Receiver<Command>, ready: mpsc::SyncSender<bool>) {
                     Some("ActionInvoked") => {
                         let Ok((server, key)) = body.deserialize::<(u32, String)>() else { continue };
                         if let Some((id, s)) = shown.iter_mut().find(|(_, s)| s.server == server) {
-                            deliver(click_for(id, &s.info, &key, s.token.take()));
+                            deliver(click_for(
+                                id,
+                                &s.info,
+                                (key != DEFAULT_ACTION).then_some(key.as_str()),
+                                s.token.take(),
+                            ));
                         }
                     }
                     Some("NotificationClosed") => {
@@ -232,17 +301,24 @@ pub(crate) fn body_for(body: &str, caps: Caps) -> String {
     out
 }
 
-/// The click for action `key` on notification `id`: its user info, plus the button and the
-/// activation token when there are any.
-pub(crate) fn click_for(id: &str, info: &[(String, String)], key: &str, token: Option<String>) -> Click {
+/// The click for notification `id`: its user info, plus the button and activation token when present.
+fn click_for(
+    id: &str,
+    info: &[(String, String)],
+    action: Option<&str>,
+    token: Option<String>,
+) -> Click {
     let mut info = info.to_vec();
-    if key != DEFAULT_ACTION {
+    if let Some(key) = action {
         info.push((ACTION.to_owned(), key.to_owned()));
     }
     if let Some(token) = token {
         info.push((TOKEN.to_owned(), token));
     }
-    Click { id: id.to_owned(), info }
+    Click {
+        id: id.to_owned(),
+        info,
+    }
 }
 
 #[cfg(test)]

@@ -25,10 +25,10 @@ fn body_is_escaped_only_for_a_markup_server() {
 #[test]
 fn a_click_carries_the_posted_info_its_button_and_token() {
     let info = vec![("message".to_owned(), "42".to_owned())];
-    let click = click_for("m-1", &info, "default", None);
+    let click = click_for("m-1", &info, None, None);
     assert_eq!(click, Click { id: "m-1".into(), info: info.clone() });
     assert_eq!(click.action(), None);
-    let click = click_for("m-1", &info, "archive", Some("tok".into()));
+    let click = click_for("m-1", &info, Some("archive"), Some("tok".into()));
     assert_eq!(click.get("message"), Some("42"));
     assert_eq!(click.action(), Some("archive"));
     assert_eq!(click.activation_token(), Some("tok"));
