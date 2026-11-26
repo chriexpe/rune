@@ -9,13 +9,20 @@
 //!   posts before either. With an activation scheme (`Identity::activation`) a click
 //!   opens a link on that scheme, which reaches the app whether it runs or not, as long as the
 //!   toast is in the notification center; `click_from_url` turns the link back into the click.
+//! - **Linux:** `org.freedesktop.portal.Notification` inside a Flatpak, and
+//!   `org.freedesktop.Notifications` outside it. `register` or `adopt` gives the process its
+//!   desktop-entry identity and display name; nothing posts before either. Clicks carry any
+//!   Wayland/XDG activation token the daemon supplies (`Click::activation_token`).
 //! - **Elsewhere:** `available` is false and every call does nothing.
 //!
-//! Notifications are silent: they never play a sound.
+//! Notifications are silent by default; call [`Notification::sound`] to allow the desktop's
+//! notification sound hint.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "windows")]
@@ -28,23 +35,37 @@ pub struct Notification {
     title: String,
     body: String,
     info: Vec<(String, String)>,
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+        allow(dead_code)
+    )]
     actions: Vec<Action>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    sound: bool,
 }
 
 /// A button on a notification, or a text box with its send button.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 enum Action {
     Button { id: String, label: String },
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Reply { id: String, placeholder: String, label: String },
 }
 
 /// The user-info key a click on a button carries its id under (`Click::action`).
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 const ACTION: &str = "rune.action";
 /// The prefix of the user-info keys a click carries a text box's words under (`Click::input`).
 const INPUT: &str = "rune.input.";
+/// The user-info key a Linux click carries its Wayland/XDG activation token under.
+const ACTIVATION_TOKEN: &str = "rune.activation_token";
 
 impl Notification {
     /// Posting another notification with the same `id` replaces this one.
@@ -77,6 +98,13 @@ impl Notification {
         self.actions.push(Action::Reply { id: id.into(), placeholder: placeholder.into(), label: label.into() });
         self
     }
+
+    /// Whether the desktop notification should play its default notification sound.
+    /// Off by default (silent). On Linux, controls the notification daemon / portal sound hint.
+    pub fn sound(mut self, sound: bool) -> Self {
+        self.sound = sound;
+        self
+    }
 }
 
 /// A click on one of the app's notifications, or on its default action.
@@ -101,6 +129,12 @@ impl Click {
     /// What was typed in text box `id` (`Notification::reply`).
     pub fn input(&self, id: &str) -> Option<&str> {
         self.info.iter().find(|(k, _)| k.strip_prefix(INPUT) == Some(id)).map(|(_, v)| v.as_str())
+    }
+
+    /// Wayland / XDG activation token handed back by the desktop notification daemon when this
+    /// click arrived, if any. Pass to `AppHandle::activate` to raise the window.
+    pub fn activation_token(&self) -> Option<&str> {
+        self.get(ACTIVATION_TOKEN)
     }
 }
 
@@ -153,7 +187,11 @@ pub fn register(identity: &Identity) -> Result<(), String> {
     {
         windows::register(identity)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::register(identity)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = identity;
         Ok(())
@@ -164,13 +202,17 @@ pub fn register(identity: &Identity) -> Result<(), String> {
 /// registered it (the `AppUserModelId\<id>` key and the activation scheme): toasts post under
 /// `identity.id` and, with an activation scheme, open links on it. Its name and icon are ignored;
 /// the registration names the toasts. Call it where `register` would go; calling it again with
-/// the same id only changes the activation scheme. Windows only; elsewhere it does nothing.
+/// the same id only changes the activation scheme. Windows and Linux; elsewhere it does nothing.
 pub fn adopt(identity: &Identity) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         windows::adopt(identity)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::register(identity)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = identity;
         Ok(())
@@ -184,7 +226,10 @@ fn handler() -> &'static Mutex<Option<Handler>> {
     HANDLER.get_or_init(|| Mutex::new(None))
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 fn deliver(click: Click) {
     if let Some(f) = handler().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         f(click);
@@ -192,7 +237,7 @@ fn deliver(click: Click) {
 }
 
 /// Whether this process can post: on macOS it runs from a `.app` bundle with a bundle
-/// identifier; on Windows `register` gave it an identity.
+/// identifier; on Windows and Linux `register` or `adopt` gave it an identity.
 pub fn available() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -202,15 +247,22 @@ pub fn available() -> bool {
     {
         windows::registered()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::registered()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
 }
 
 /// Posts `n` now (on macOS, asking for permission first if the person hasn't been asked).
-/// Returns false when the app can't post at all (not `available`), or Windows refused the toast.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(unused_variables))]
+/// Returns false when the app can't post at all (not `available`), or the platform refused it.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(unused_variables)
+)]
 pub fn post(n: &Notification) -> bool {
     if !available() {
         return false;
@@ -224,14 +276,18 @@ pub fn post(n: &Notification) -> bool {
     {
         windows::post(n)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::post(n.clone())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
 }
 
 /// Takes the app's delivered notifications with these ids out of Notification Center (on
-/// Windows, the notification center).
+/// Windows, the notification center; on Linux, closes them via D-Bus or the portal).
 pub fn remove(ids: &[&str]) {
     if ids.is_empty() || !available() {
         return;
@@ -240,6 +296,8 @@ pub fn remove(ids: &[&str]) {
     mac::remove(ids);
     #[cfg(target_os = "windows")]
     windows::remove(ids);
+    #[cfg(target_os = "linux")]
+    linux::remove(ids);
 }
 
 /// The click a notification link stands for, when `url` is one of this app's
@@ -267,6 +325,10 @@ pub fn on_click(f: impl Fn(Click) + Send + Sync + 'static) {
     #[cfg(target_os = "macos")]
     if available() {
         mac::install_delegate();
+    }
+    #[cfg(target_os = "linux")]
+    if available() {
+        linux::ensure_started();
     }
 }
 
