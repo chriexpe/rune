@@ -172,10 +172,7 @@ impl El {
             return self;
         }
         let at = t.cold.pills.partition_point(|p| p.start < start);
-        let InlineImage { pixels, width, ascent, descent, bleed } = image;
-        let replace = Some(Replace { width, ascent, descent, bleed });
-        let bare = Some(Box::new(BareIcon { size: 0.0, gap: 0.0, radius: 0.0, image: Some(pixels), replace, label: None, help: None }));
-        t.cold.pills.insert(at, PillChip { start, end, icon: None, image: None, bg: None, fg: None, ring: None, radius: None, bare });
+        t.cold.pills.insert(at, image.into_chip(start, end));
         self
     }
 
@@ -259,6 +256,14 @@ fn points(v: f32) -> f32 {
 }
 
 impl InlineImage {
+    /// The chip that draws this image in place of bytes `start..end`.
+    pub(crate) fn into_chip(self, start: u32, end: u32) -> PillChip {
+        let InlineImage { pixels, width, ascent, descent, bleed } = self;
+        let replace = Some(Replace { width, ascent, descent, bleed });
+        let bare = Some(Box::new(BareIcon { size: 0.0, gap: 0.0, radius: 0.0, image: Some(pixels), replace, label: None, help: None }));
+        PillChip { start, end, icon: None, image: None, bg: None, fg: None, ring: None, radius: None, bare }
+    }
+
     pub fn new(pixels: crate::Pixels, width: f32, ascent: f32, descent: f32) -> Self {
         Self { pixels, width: points(width), ascent: points(ascent), descent: points(descent), bleed: 0.0 }
     }

@@ -441,3 +441,44 @@ mod live {
         assert!(rt_static.instances.iter().any(|q| q.params[1] == crate::render::KIND_IMAGE));
     }
 }
+
+#[test]
+fn a_field_pill_drawn_as_an_inline_image_takes_the_image_room_and_keeps_its_label() {
+    use crate::{Cx, Env, Runtime, col};
+    struct FieldState {
+        edit: TextEdit,
+        emoji: crate::Pixels,
+    }
+    fn field(edit: &TextEdit, emoji: &crate::Pixels) -> crate::El {
+        let px = emoji.clone();
+        text_input(edit, TextStyle::new(14.0, 400.0).lh(20.0))
+            .pill_inline_image(move |id| (id == "emoji:gato").then(|| crate::InlineImage::new(px.clone(), 20.0, 16.0, 4.0)))
+    }
+    let style = TextStyle::new(14.0, 400.0).lh(20.0);
+    let mut edit = TextEdit::new("oi ").rich();
+    edit.insert_pill("emoji:gato", ":gato:");
+    edit.insert(" tudo");
+    let emoji = image(40, 40);
+    // The pill is a replaced chip: no chip colours, the image standing in its bytes.
+    let e = field(&edit, &emoji);
+    let chips = &e.text.as_ref().unwrap().cold.pills;
+    assert_eq!(chips.len(), 1);
+    assert!(chips[0].bg.is_none() && chips[0].image.is_none());
+    assert!(chips[0].bare.as_ref().is_some_and(|b| b.replace.is_some() && b.image.is_some()));
+    // Its room is the image's 20 points, not the label's.
+    let mut ts = TextSystem::default();
+    let mut lay = |e: &crate::El| ts.layout_for_spec(&e.text.as_ref().unwrap().as_text_input(1.0, true), 1.0, None, Alignment::Start).full_width();
+    let with = lay(&e);
+    let without = lay(&text_input(&TextEdit::new("oi  tudo"), style));
+    assert!((with - without - 20.0).abs() < 1.5, "{with} vs {without}");
+
+    let view = |s: &FieldState, _: &mut Cx<FieldState>| col().key("root").padding(8.0).child(field(&s.edit, &s.emoji).key("field").w(320.0).h(40.0));
+    let mut rt = Runtime::new(FieldState { edit: edit.clone(), emoji }, view, (360.0, 80.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let img = rt.instances.iter().find(|q| q.params[1] == crate::render::KIND_IMAGE).expect("the emoji draws as an image");
+    assert!((img.rect[2] - 20.0).abs() < 0.5, "{:?}", img.rect);
+    // The field's value is still its text, label included.
+    let tree = rt.accessibility_tree();
+    let value = tree.nodes.iter().find(|(_, n)| matches!(n.role(), accesskit::Role::TextInput | accesskit::Role::MultilineTextInput)).and_then(|(_, n)| n.value().map(str::to_owned));
+    assert_eq!(value.as_deref(), Some("oi :gato: tudo"));
+}

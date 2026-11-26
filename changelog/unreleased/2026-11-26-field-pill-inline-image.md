@@ -1,0 +1,1 @@
+- `El::pill_inline_image` lets text fields draw a picked emoji or other pill as an inline image while preserving its text for copying and accessibility.

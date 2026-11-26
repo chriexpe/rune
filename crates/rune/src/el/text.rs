@@ -375,6 +375,28 @@ impl El {
         }
         self
     }
+    /// Draws a [`Mark::Pill`](crate::Mark::Pill) in a [`text_input`] as an image in place of
+    /// its label, by the pill's id (`None`: drawn as a chip), standing on the baseline as
+    /// [`El::inline_image`] does in static text: a custom emoji in a message field, say. The
+    /// label's bytes take no room and draw nothing, but stay the field's text, so the caret
+    /// steps over the image as over any pill, deleting takes it whole, and copy and the
+    /// accessibility value see the label. When `Some`, no chip, icon or
+    /// [`El::pill_image`] is drawn for that pill.
+    ///
+    /// ```ignore
+    /// text_input(&s.draft, body).pill_inline_image({
+    ///     let emoji = s.emoji.clone();
+    ///     move |id| emoji.get(id).map(|px| InlineImage::new(px.clone(), 20.0, 16.0, 4.0))
+    /// })
+    /// ```
+    pub fn pill_inline_image(mut self, image: impl Fn(&str) -> Option<crate::InlineImage> + 'static) -> Self {
+        if let Some(inp) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            inp.pill_inline_image = Some(Rc::new(image));
+            self.sync_input_pills();
+            self.sync_input_rich();
+        }
+        self
+    }
     /// The look of each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`] by the
     /// pill's id: chip colour, label colour and icon, so a person and an agent can differ.
     /// What the style leaves unset falls back to [`El::pill_colors`] and [`El::pill_icon`].
@@ -426,6 +448,9 @@ impl El {
             .display_pills()
             .into_iter()
             .map(|(start, end, id)| {
+                if let Some(image) = inp.pill_inline_image.as_ref().and_then(|f| f(id)) {
+                    return image.into_chip(start, end);
+                }
                 let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
                 let image = inp.pill_image.as_ref().and_then(|f| f(id));
                 let icon = if image.is_some() {
