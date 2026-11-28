@@ -969,3 +969,530 @@ fn to_rgba_roundtrips_every_supported_format() {
         assert_eq!((rw, rh, argba.len()), (aw, ah, aw as usize * ah as usize * 4));
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn load_scaled_animated_downsamples_while_preserving_animation_and_viewer_full_res() {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame};
+
+    let mut gif = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut gif);
+        let f0 = image::RgbaImage::from_pixel(128, 64, image::Rgba([255, 0, 0, 255]));
+        let mut f1 = image::RgbaImage::from_pixel(128, 64, image::Rgba([0, 0, 255, 255]));
+        // Add a transparent band on frame 1 to verify alpha preservation after downsampling.
+        for x in 0..64 {
+            for y in 0..64 {
+                f1.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            }
+        }
+        enc.encode_frame(Frame::from_parts(f0, 0, 0, Delay::from_numer_denom_ms(80, 1))).unwrap();
+        enc.encode_frame(Frame::from_parts(f1, 0, 0, Delay::from_numer_denom_ms(120, 1))).unwrap();
+    }
+    let bytes: Arc<[u8]> = gif.into();
+    let cache = ImageCache::new(Arc::new(|| {}));
+
+    let full = cache.load(Arc::clone(&bytes));
+    let still = cache.load_scaled(Arc::clone(&bytes), 16.0, 2.0);
+    let anim = cache.load_scaled_animated(Arc::clone(&bytes), 16.0, 2.0);
+    let no_upscale = cache.load_scaled_animated(Arc::clone(&bytes), 200.0, 2.0);
+
+    assert!(!Arc::ptr_eq(&full.0, &anim.0), "full and scaled-animated keep distinct keys");
+    assert!(!Arc::ptr_eq(&still.0, &anim.0), "still-scaled and animated-scaled keep distinct keys");
+    assert_eq!(full.wait(), Ok([128, 64]));
+    assert_eq!(still.wait(), Ok([32, 16]));
+    assert_eq!(anim.wait(), Ok([32, 16]));
+    assert_eq!(no_upscale.wait(), Ok([128, 64]), "never upscales");
+
+    assert!(full.is_animated());
+    assert!(!still.is_animated());
+    assert!(anim.is_animated());
+    assert!(anim.decoded_bytes() < full.decoded_bytes() / 10);
+    assert!(still.decoded_bytes() < anim.decoded_bytes());
+
+    let motion = anim.decoded().unwrap().unwrap().motion.as_ref().unwrap();
+    assert_eq!(motion.ends.len(), 2);
+    assert!((motion.ends[0] - 0.08).abs() < 1e-6);
+    assert!((motion.ends[1] - 0.20).abs() < 1e-6);
+    // Frame 1 right half is opaque blue; left half is transparent.
+    let f1_mips = &motion.frames[0][0];
+    assert_eq!((f1_mips.width, f1_mips.height), (32, 16));
+    assert_eq!(&f1_mips.pixels[0..4], &[0, 0, 0, 0]);
+    let right_off = (8 * 32 + 24) * 4;
+    assert_eq!(&f1_mips.pixels[right_off..right_off + 4], &[0, 0, 255, 255]);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn large_animation_streams_within_bounded_memory_and_trims_on_rest() {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame};
+
+    // 256x256 x 24 frames would take ~8.4 MiB eagerly (> 4 MiB CACHED_BUDGET) -> streams!
+    let mut gif = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut gif);
+        for i in 0..24u8 {
+            let color = match i % 3 {
+                0 => image::Rgba([220, 20, 20, 255]),
+                1 => image::Rgba([20, 220, 20, 255]),
+                _ => image::Rgba([20, 20, 220, 255]),
+            };
+            let img = image::RgbaImage::from_pixel(256, 256, color);
+            enc.encode_frame(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+        }
+    }
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let img = cache.load_scaled_animated(gif, 256.0, 1.0);
+    assert_eq!(img.wait(), Ok([256, 256]));
+    assert!(img.is_animated());
+    // Must stay far below eager 8.4 MiB footprint (frame 0 ~341 KiB + small encoded GIF).
+    assert!(
+        img.decoded_bytes() < 2 * 1024 * 1024,
+        "streaming animation used too much RAM: {} bytes",
+        img.decoded_bytes()
+    );
+
+    let mut atlas = crate::pixels::ImageAtlas::default();
+    let (placed0, next0) = atlas.place_at(img.pixels(), [256.0, 256.0], Some(0.0)).unwrap();
+    assert!(next0.is_some());
+    atlas.end_frame();
+    // Wait briefly for the background stepper to prefetch frame 1.
+    for _ in 0..100 {
+        let (placed1, _) = atlas.place_at(img.pixels(), [256.0, 256.0], Some(0.11)).unwrap();
+        atlas.end_frame();
+        let page = &atlas.pages[placed1.page];
+        let [x, y, ..] = placed1.rect;
+        let off = ((y * page.width + x) * 4) as usize;
+        if page.data[off + 1] > 180 {
+            // Frame 1 is green!
+            assert!(page.data[off] < 60 && page.data[off + 2] < 60);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = placed0;
+    let active_bytes = img.decoded_bytes();
+    assert!(active_bytes < 3 * 1024 * 1024, "active streaming bytes: {active_bytes}");
+
+    // Stop drawing the animation and call rest(): transient buffers drop immediately.
+    atlas.end_frame();
+    atlas.rest();
+    assert!(
+        img.decoded_bytes() < active_bytes,
+        "rest() should drop active streaming frame buffers: before={active_bytes}, after={}",
+        img.decoded_bytes()
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn dropped_handle_cancels_queued_decode_without_waking() {
+    let (tx, rx) = mpsc::channel();
+    let cache = ImageCache::new(Arc::new(move || { tx.send(()).ok(); }));
+    // Block all decoder slots with gated jobs, queue a cancellation target, drop it, then release.
+    let mut gates = Vec::new();
+    let mut blockers = Vec::new();
+    for i in 0..DECODERS {
+        let (rel, g) = mpsc::channel();
+        gates.push(rel);
+        let input = Input::Rgba(65, 64, vec![10; 65 * 64 * 4].into());
+        blockers.push(cache.request([200 + i as u8; 32], Input::Gated(Box::new(input), g)));
+    }
+    let cancelled = cache.request([250; 32], Input::Panic);
+    drop(cancelled);
+    for rel in gates {
+        rel.send(()).unwrap();
+    }
+    for b in &blockers {
+        assert_eq!(b.wait(), Ok([65, 64]));
+    }
+    // Exactly DECODERS wakes fired; the dropped Input::Panic job was never executed.
+    let mut wakes = 0;
+    while rx.recv_timeout(std::time::Duration::from_millis(50)).is_ok() {
+        wakes += 1;
+    }
+    assert_eq!(wakes, DECODERS);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn load_scaled_rgb8_jpeg_downsamples_directly_with_exact_srgb_output() {
+    let src = image::RgbImage::from_fn(256, 128, |x, _| {
+        if x < 128 { image::Rgb([240, 20, 20]) } else { image::Rgb([20, 20, 240]) }
+    });
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    src.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let scaled = cache.load_scaled(jpeg.into_inner(), 32.0, 2.0);
+    assert_eq!(scaled.wait(), Ok([64, 32]));
+    let (_, _, rgba) = scaled.to_rgba().unwrap();
+    let left = &rgba[(16 * 64 + 8) * 4..][..4];
+    let right = &rgba[(16 * 64 + 56) * 4..][..4];
+    assert!(left[0] > 200 && left[2] < 50 && left[3] == 255, "left={left:?}");
+    assert!(right[2] > 200 && right[0] < 50 && right[3] == 255, "right={right:?}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rgb8_icc_and_downsample_matches_rgba8_path() {
+    let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+    let mut rgb = Vec::with_capacity(64 * 32 * 3);
+    let mut rgba = Vec::with_capacity(64 * 32 * 4);
+    for y in 0..32u32 {
+        for x in 0..64u32 {
+            let r = ((x * 4) % 256) as u8;
+            let g = ((y * 8) % 256) as u8;
+            let b = (((x + y) * 3) % 256) as u8;
+            rgb.extend_from_slice(&[r, g, b]);
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    let mut rgb_conv = rgb.clone();
+    crate::icc::convert_rgb_to_srgb(Some(&p3), &mut rgb_conv);
+    let mut rgba_conv = rgba.clone();
+    crate::icc::convert_rgba_to_srgb(Some(&p3), &mut rgba_conv);
+
+    // Every pixel's RGB ICC conversion must match the RGBA ICC conversion exactly.
+    for (p_rgb, p_rgba) in rgb_conv.chunks_exact(3).zip(rgba_conv.chunks_exact(4)) {
+        assert_eq!(p_rgb, &p_rgba[..3], "RGB and RGBA ICC conversion must match");
+    }
+    // Downsampling RGB8 directly to RGBA8 must match downsampling RGBA8 with alpha=255.
+    let ds_rgb = crate::mips::downsample_rgb_to_rgba(64, 32, &rgb_conv, 16, 8).unwrap();
+    let (_, _, ds_rgba) = crate::mips::downsample_rgba_to(64, 32, rgba_conv, 16, 8).unwrap();
+    assert_eq!(ds_rgb, ds_rgba, "RGB->RGBA downsample must match RGBA->RGBA downsample");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn large_apng_switches_to_stream_during_decode_and_plays() {
+    let w = 256u32;
+    let h = 256u32;
+    let frame_count = 16u32; // 16 * 341 KiB = ~5.4 MiB > 4 MiB CACHED_BUDGET -> switched_to_stream
+
+    let zlib_stored = |raw: &[u8]| -> Vec<u8> {
+        let mut out = Vec::with_capacity(raw.len() + 64);
+        out.extend_from_slice(&[0x78, 0x01]);
+        let mut pos = 0;
+        loop {
+            let len = (raw.len() - pos).min(65_535);
+            let is_final = pos + len == raw.len();
+            out.push(u8::from(is_final));
+            let len16 = len as u16;
+            out.extend_from_slice(&len16.to_le_bytes());
+            out.extend_from_slice(&(!len16).to_le_bytes());
+            out.extend_from_slice(&raw[pos..pos + len]);
+            pos += len;
+            if is_final { break; }
+        }
+        let (mut s1, mut s2) = (1u32, 0u32);
+        for &b in raw {
+            s1 = (s1 + u32::from(b)) % 65_521;
+            s2 = (s2 + s1) % 65_521;
+        }
+        out.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+        out
+    };
+    let push_chunk = |out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]| {
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        let mut c = !0u32;
+        for &b in kind.iter().chain(body.iter()) {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                c = (c >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(c & 1));
+            }
+        }
+        out.extend_from_slice(&(!c).to_be_bytes());
+    };
+    let scanlines = |rgba: [u8; 4]| -> Vec<u8> {
+        let row_bytes = w as usize * 4;
+        let mut raw = Vec::with_capacity((row_bytes + 1) * h as usize);
+        for _ in 0..h {
+            raw.push(0);
+            for _ in 0..w {
+                raw.extend_from_slice(&rgba);
+            }
+        }
+        zlib_stored(&raw)
+    };
+    let fctl = |seq: u32| -> Vec<u8> {
+        let mut d = Vec::with_capacity(26);
+        d.extend_from_slice(&seq.to_be_bytes());
+        d.extend_from_slice(&w.to_be_bytes());
+        d.extend_from_slice(&h.to_be_bytes());
+        d.extend_from_slice(&0u32.to_be_bytes());
+        d.extend_from_slice(&0u32.to_be_bytes());
+        d.extend_from_slice(&100u16.to_be_bytes());
+        d.extend_from_slice(&1000u16.to_be_bytes());
+        d.push(1);
+        d.push(0);
+        d
+    };
+
+    let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = [0u8; 13];
+    ihdr[0..4].copy_from_slice(&w.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&h.to_be_bytes());
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    push_chunk(&mut apng, b"IHDR", &ihdr);
+    let mut actl = Vec::with_capacity(8);
+    actl.extend_from_slice(&frame_count.to_be_bytes());
+    actl.extend_from_slice(&0u32.to_be_bytes());
+    push_chunk(&mut apng, b"acTL", &actl);
+
+    let red_zlib = scanlines([220, 20, 20, 255]);
+    let green_zlib = scanlines([20, 220, 20, 255]);
+    push_chunk(&mut apng, b"fcTL", &fctl(0));
+    push_chunk(&mut apng, b"IDAT", &red_zlib);
+    let mut seq = 1u32;
+    for i in 1..frame_count {
+        push_chunk(&mut apng, b"fcTL", &fctl(seq));
+        seq += 1;
+        let payload = if i % 2 == 1 { &green_zlib } else { &red_zlib };
+        let mut fdat = Vec::with_capacity(4 + payload.len());
+        fdat.extend_from_slice(&seq.to_be_bytes());
+        fdat.extend_from_slice(payload);
+        push_chunk(&mut apng, b"fdAT", &fdat);
+        seq += 1;
+    }
+    push_chunk(&mut apng, b"IEND", &[]);
+
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let img = cache.load_scaled_animated(apng, 256.0, 1.0);
+    assert_eq!(img.wait(), Ok([256, 256]));
+    assert!(img.is_animated());
+    let decoded = img.decoded().unwrap().unwrap();
+    let motion = decoded.motion.as_ref().unwrap();
+    assert!(motion.stream.is_some(), "large APNG should switch to streaming");
+    assert!(motion.frames.is_empty(), "streaming APNG must not retain eager frames 1..N");
+    assert_eq!(motion.ends.len(), frame_count as usize);
+
+    let mut atlas = crate::pixels::ImageAtlas::default();
+    atlas.place_at(img.pixels(), [256.0, 256.0], Some(0.0)).unwrap();
+    atlas.end_frame();
+    let mut saw_green = false;
+    for _ in 0..100 {
+        let (placed, _) = atlas.place_at(img.pixels(), [256.0, 256.0], Some(0.11)).unwrap();
+        atlas.end_frame();
+        let page = &atlas.pages[placed.page];
+        let [x, y, ..] = placed.rect;
+        let off = ((y * page.width + x) * 4) as usize;
+        if page.data[off + 1] > 180 {
+            saw_green = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(saw_green, "streaming APNG should decode and display frame 1");
+    atlas.rest();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn streaming_gif_handles_loop_wrap_and_corrupt_tail_without_wake_spin() {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // 256x256 x 16 frames > 4 MiB -> streams via scan_gif_ends fast path.
+    let mut gif = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut gif);
+        for i in 0..16u8 {
+            let color = match i % 2 {
+                0 => image::Rgba([220, 20, 20, 255]),
+                _ => image::Rgba([20, 220, 20, 255]),
+            };
+            let img = image::RgbaImage::from_pixel(256, 256, color);
+            enc.encode_frame(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+        }
+    }
+
+    // 1. Verify loop wrap (t past full 1.6s period wraps cleanly back to frame 0 and frame 1).
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let img = cache.load_scaled_animated(gif.clone(), 256.0, 1.0);
+    assert_eq!(img.wait(), Ok([256, 256]));
+    let mut atlas = crate::pixels::ImageAtlas::default();
+    atlas.place_at(img.pixels(), [256.0, 256.0], Some(0.0)).unwrap();
+    atlas.end_frame();
+    // Advance to last frame, then wrap around to frame 0 and frame 1 of second loop.
+    let mut saw_wrapped_green = false;
+    for _ in 0..100 {
+        let (placed, _) = atlas.place_at(img.pixels(), [256.0, 256.0], Some(1.71)).unwrap();
+        atlas.end_frame();
+        let page = &atlas.pages[placed.page];
+        let [x, y, ..] = placed.rect;
+        let off = ((y * page.width + x) * 4) as usize;
+        if page.data[off + 1] > 180 {
+            saw_wrapped_green = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(saw_wrapped_green, "streaming GIF should play after looping past its period");
+    atlas.rest();
+
+    // 2. Corrupt the LZW payload bytes inside the last frame while keeping GIF block framing intact
+    //    so scan_gif_ends succeeds, then request that frame and verify no infinite wake spin.
+    let mut corrupt = gif;
+    // Locate the last image descriptor (0x2C) and corrupt its LZW minimum code size byte (descriptor + 10)
+    // to an invalid value (> 12) so the LZW decoder returns an error on that frame.
+    if let Some(pos) = corrupt.windows(2).rposition(|w| w == [0x00, 0x2C]) {
+        let desc = pos + 1;
+        if desc + 10 < corrupt.len() {
+            let lct_packed = corrupt[desc + 9];
+            let lct = if lct_packed & 0x80 != 0 { 3usize << ((lct_packed & 0x07) + 1) } else { 0 };
+            if desc + 10 + lct < corrupt.len() {
+                corrupt[desc + 10 + lct] = 99;
+            }
+        }
+    }
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let wakes_cb = Arc::clone(&wakes);
+    let cache2 = ImageCache::new(Arc::new(move || { wakes_cb.fetch_add(1, Ordering::Relaxed); }));
+    let bad_tail = cache2.load_scaled_animated(corrupt, 256.0, 1.0);
+    assert_eq!(bad_tail.wait(), Ok([256, 256]));
+    let wakes_after_load = wakes.load(Ordering::Relaxed);
+    let mut atlas2 = crate::pixels::ImageAtlas::default();
+    // Repeatedly request the corrupted last frame; failed_from must clamp and not spin wakes.
+    for _ in 0..20 {
+        atlas2.place_at(bad_tail.pixels(), [256.0, 256.0], Some(1.55)).unwrap();
+        atlas2.end_frame();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let extra_wakes = wakes.load(Ordering::Relaxed) - wakes_after_load;
+    assert!(extra_wakes <= 2, "corrupt tail frame must clamp without wake spin: extra_wakes={extra_wakes}");
+    atlas2.rest();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn load_scaled_animated_preserves_gif_disposal_and_apng_icc() {
+    // 1. GIF with Background disposal: frame 0 fills red, frame 1 draws green only on the right
+    //    half after disposing frame 0 to transparent background -> left half of frame 1 is transparent.
+    let mut gif = Vec::new();
+    {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame};
+        let mut enc = GifEncoder::new(&mut gif);
+        let f0 = image::RgbaImage::from_pixel(64, 32, image::Rgba([255, 0, 0, 255]));
+        let mut f1 = image::RgbaImage::from_pixel(64, 32, image::Rgba([0, 0, 0, 0]));
+        for x in 32..64 {
+            for y in 0..32 {
+                f1.put_pixel(x, y, image::Rgba([0, 255, 0, 255]));
+            }
+        }
+        enc.encode_frame(Frame::from_parts(f0, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+        enc.encode_frame(Frame::from_parts(f1, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+    }
+    let cache = ImageCache::new(Arc::new(|| {}));
+    let scaled_gif = cache.load_scaled_animated(gif, 16.0, 2.0);
+    assert_eq!(scaled_gif.wait(), Ok([32, 16]));
+    let d_gif = scaled_gif.decoded().unwrap().unwrap();
+    let f1 = &d_gif.motion.as_ref().unwrap().frames[0][0];
+    assert_eq!(&f1.pixels[0..4], &[0, 0, 0, 0], "left half disposed to transparent");
+    let right_off = (8 * 32 + 24) * 4;
+    assert_eq!(&f1.pixels[right_off..right_off + 4], &[0, 255, 0, 255], "right half opaque green");
+
+    // 2. Display-P3 ICC-tagged 2-frame APNG: scaled animated output matches ICC-converted sRGB.
+    let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+    let p3_red = [255u8, 0, 0, 255];
+    let p3_green = [0u8, 255, 0, 255];
+    let mut expected_f0 = p3_red;
+    let mut expected_f1 = p3_green;
+    crate::icc::convert_rgba_to_srgb(Some(&p3), &mut expected_f0);
+    crate::icc::convert_rgba_to_srgb(Some(&p3), &mut expected_f1);
+
+    let make_apng_icc = |w: u32, h: u32, c0: [u8; 4], c1: [u8; 4], icc: &[u8]| -> Vec<u8> {
+        let zlib_stored = |raw: &[u8]| -> Vec<u8> {
+            let mut out = Vec::with_capacity(raw.len() + 32);
+            out.extend_from_slice(&[0x78, 0x01]);
+            let mut pos = 0;
+            loop {
+                let len = (raw.len() - pos).min(65_535);
+                let is_final = pos + len == raw.len();
+                out.push(u8::from(is_final));
+                let len16 = len as u16;
+                out.extend_from_slice(&len16.to_le_bytes());
+                out.extend_from_slice(&(!len16).to_le_bytes());
+                out.extend_from_slice(&raw[pos..pos + len]);
+                pos += len;
+                if is_final { break; }
+            }
+            let (mut s1, mut s2) = (1u32, 0u32);
+            for &b in raw {
+                s1 = (s1 + u32::from(b)) % 65_521;
+                s2 = (s2 + s1) % 65_521;
+            }
+            out.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+            out
+        };
+        let push_chunk = |out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]| {
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+            let mut c = !0u32;
+            for &b in kind.iter().chain(body.iter()) {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = (c >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(c & 1));
+                }
+            }
+            out.extend_from_slice(&(!c).to_be_bytes());
+        };
+        let scanlines = |rgba: [u8; 4]| {
+            let mut raw = Vec::with_capacity((w as usize * 4 + 1) * h as usize);
+            for _ in 0..h {
+                raw.push(0);
+                for _ in 0..w { raw.extend_from_slice(&rgba); }
+            }
+            zlib_stored(&raw)
+        };
+        let fctl = |seq: u32| {
+            let mut d = Vec::with_capacity(26);
+            d.extend_from_slice(&seq.to_be_bytes());
+            d.extend_from_slice(&w.to_be_bytes());
+            d.extend_from_slice(&h.to_be_bytes());
+            d.extend_from_slice(&0u32.to_be_bytes());
+            d.extend_from_slice(&0u32.to_be_bytes());
+            d.extend_from_slice(&100u16.to_be_bytes());
+            d.extend_from_slice(&1000u16.to_be_bytes());
+            d.push(1);
+            d.push(0);
+            d
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = [0u8; 13];
+        ihdr[0..4].copy_from_slice(&w.to_be_bytes());
+        ihdr[4..8].copy_from_slice(&h.to_be_bytes());
+        ihdr[8] = 8;
+        ihdr[9] = 6;
+        push_chunk(&mut png, b"IHDR", &ihdr);
+        let mut iccp = b"ICC\0".to_vec();
+        iccp.push(0);
+        iccp.extend_from_slice(&zlib_stored(icc));
+        push_chunk(&mut png, b"iCCP", &iccp);
+        push_chunk(&mut png, b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
+        push_chunk(&mut png, b"fcTL", &fctl(0));
+        push_chunk(&mut png, b"IDAT", &scanlines(c0));
+        push_chunk(&mut png, b"fcTL", &fctl(1));
+        let mut fdat = 2u32.to_be_bytes().to_vec();
+        fdat.extend_from_slice(&scanlines(c1));
+        push_chunk(&mut png, b"fdAT", &fdat);
+        push_chunk(&mut png, b"IEND", &[]);
+        png
+    };
+
+    let apng = make_apng_icc(64, 32, p3_red, p3_green, &p3);
+    let scaled_apng = cache.load_scaled_animated(apng, 16.0, 2.0);
+    assert_eq!(scaled_apng.wait(), Ok([32, 16]));
+    let d_apng = scaled_apng.decoded().unwrap().unwrap();
+    let got0 = &d_apng.mips[0].pixels[0..4];
+    let got1 = &d_apng.motion.as_ref().unwrap().frames[0][0].pixels[0..4];
+    assert!(got0.iter().zip(expected_f0).all(|(g, e)| g.abs_diff(e) <= 1), "f0={got0:?} vs {expected_f0:?}");
+    assert!(got1.iter().zip(expected_f1).all(|(g, e)| g.abs_diff(e) <= 1), "f1={got1:?} vs {expected_f1:?}");
+}

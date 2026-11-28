@@ -84,6 +84,16 @@ fn downsample_rgba(w: u32, h: u32, src: &[u8], nw: u32, nh: u32) -> Vec<u8> {
     let nwf = nw as f32;
     let nhf = nh as f32;
     let w_usize = w as usize;
+    // Precompute horizontal spans once instead of per source row.
+    let x_spans: Vec<(u32, u32, f32, f32)> = (0..nw)
+        .map(|x| {
+            let x0 = (x as f32 * wf / nwf).min(wf);
+            let x1 = ((x + 1) as f32 * wf / nwf).min(wf);
+            let sx_start = x0.floor() as u32;
+            let sx_end = (x1.ceil() as u32).min(w);
+            (sx_start, sx_end, x0, x1)
+        })
+        .collect();
     for y in 0..nh {
         row_sum.fill([0.0; 4]);
         let y0 = (y as f32 * hf / nhf).min(hf);
@@ -94,12 +104,8 @@ fn downsample_rgba(w: u32, h: u32, src: &[u8], nw: u32, nh: u32) -> Vec<u8> {
             let wy = (((sy + 1) as f32).min(y1) - (sy as f32).max(y0)).max(0.0);
             if wy == 0.0 { continue; }
             let src_row = &src[sy as usize * w_usize..(sy as usize + 1) * w_usize];
-            for x in 0..nw {
-                let x0 = (x as f32 * wf / nwf).min(wf);
-                let x1 = ((x + 1) as f32 * wf / nwf).min(wf);
-                let sx_start = x0.floor() as u32;
-                let sx_end = (x1.ceil() as u32).min(w);
-                let acc = &mut row_sum[x as usize];
+            for (x, &(sx_start, sx_end, x0, x1)) in x_spans.iter().enumerate() {
+                let acc = &mut row_sum[x];
                 for sx in sx_start..sx_end {
                     let wx = (((sx + 1) as f32).min(x1) - (sx as f32).max(x0)).max(0.0);
                     let weight = wx * wy;
@@ -115,8 +121,7 @@ fn downsample_rgba(w: u32, h: u32, src: &[u8], nw: u32, nh: u32) -> Vec<u8> {
         }
         let y_span = (y1 - y0).max(f32::EPSILON);
         for (x, sum) in row_sum.iter().enumerate() {
-            let x0 = (x as f32 * wf / nwf).min(wf);
-            let x1 = ((x + 1) as f32 * wf / nwf).min(wf);
+            let (_, _, x0, x1) = x_spans[x];
             let area = (x1 - x0).max(f32::EPSILON) * y_span;
             let a = byte(sum[3] / area);
             if a == 0 || sum[3] <= 0.0 {
@@ -133,6 +138,71 @@ fn downsample_rgba(w: u32, h: u32, src: &[u8], nw: u32, nh: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Area-resamples opaque sRGB RGB8 `(w × h)` straight to sRGB RGBA8 `(nw × nh)` in linear light,
+/// avoiding a full-resolution RGBA8 intermediate buffer when scaling down large opaque images.
+pub(super) fn downsample_rgb_to_rgba(w: u32, h: u32, src: &[u8], nw: u32, nh: u32) -> Result<Vec<u8>, ImageError> {
+    if w == 0 || h == 0 || nw == 0 || nh == 0
+        || w > super::MAX_SIDE || h > super::MAX_SIDE
+        || nw > super::MAX_SIDE || nh > super::MAX_SIDE
+        || src.len() != w as usize * h as usize * 3
+    {
+        return Err(ImageError("RGB image dimensions or byte length are invalid".into()));
+    }
+    let srgb = &*SRGB;
+    let src = src.as_chunks::<3>().0;
+    let mut out = Vec::with_capacity(nw as usize * nh as usize * 4);
+    let mut row_sum = vec![[0.0f32; 3]; nw as usize];
+    let wf = w as f32;
+    let hf = h as f32;
+    let nwf = nw as f32;
+    let nhf = nh as f32;
+    let w_usize = w as usize;
+    let x_spans: Vec<(u32, u32, f32, f32)> = (0..nw)
+        .map(|x| {
+            let x0 = (x as f32 * wf / nwf).min(wf);
+            let x1 = ((x + 1) as f32 * wf / nwf).min(wf);
+            let sx_start = x0.floor() as u32;
+            let sx_end = (x1.ceil() as u32).min(w);
+            (sx_start, sx_end, x0, x1)
+        })
+        .collect();
+    for y in 0..nh {
+        row_sum.fill([0.0; 3]);
+        let y0 = (y as f32 * hf / nhf).min(hf);
+        let y1 = ((y + 1) as f32 * hf / nhf).min(hf);
+        let sy_start = y0.floor() as u32;
+        let sy_end = (y1.ceil() as u32).min(h);
+        for sy in sy_start..sy_end {
+            let wy = (((sy + 1) as f32).min(y1) - (sy as f32).max(y0)).max(0.0);
+            if wy == 0.0 { continue; }
+            let src_row = &src[sy as usize * w_usize..(sy as usize + 1) * w_usize];
+            for (x, &(sx_start, sx_end, x0, x1)) in x_spans.iter().enumerate() {
+                let acc = &mut row_sum[x];
+                for sx in sx_start..sx_end {
+                    let wx = (((sx + 1) as f32).min(x1) - (sx as f32).max(x0)).max(0.0);
+                    let weight = wx * wy;
+                    let p = &src_row[sx as usize];
+                    acc[0] += srgb.decode[p[0] as usize] * weight;
+                    acc[1] += srgb.decode[p[1] as usize] * weight;
+                    acc[2] += srgb.decode[p[2] as usize] * weight;
+                }
+            }
+        }
+        let y_span = (y1 - y0).max(f32::EPSILON);
+        for (x, sum) in row_sum.iter().enumerate() {
+            let (_, _, x0, x1) = x_spans[x];
+            let inv_area = 1.0 / ((x1 - x0).max(f32::EPSILON) * y_span);
+            out.extend_from_slice(&[
+                srgb.encode(sum[0] * inv_area, 255),
+                srgb.encode(sum[1] * inv_area, 255),
+                srgb.encode(sum[2] * inv_area, 255),
+                255,
+            ]);
+        }
+    }
+    Ok(out)
 }
 
 /// A mip chain under construction: mip 0 at once, then the smaller levels a slice of rows

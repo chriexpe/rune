@@ -102,3 +102,63 @@ pub(crate) fn convert_rgba_to_srgb(icc: Option<&[u8]>, rgba: &mut [u8]) {
         transform.apply_rgba(rgba);
     }
 }
+
+const PROBE_RGB: [u8; 125 * 3] = {
+    let mut buf = [0u8; 125 * 3];
+    let mut i = 0;
+    let mut r = 0;
+    while r < 5 {
+        let mut g = 0;
+        while g < 5 {
+            let mut b = 0;
+            while b < 5 {
+                buf[i] = PROBE_LEVELS[r];
+                buf[i + 1] = PROBE_LEVELS[g];
+                buf[i + 2] = PROBE_LEVELS[b];
+                i += 3;
+                b += 1;
+            }
+            g += 1;
+        }
+        r += 1;
+    }
+    buf
+};
+
+/// Converts straight 8-bit RGB pixels in place to sRGB when `icc` carries a non-identity RGB
+/// ICC profile, using a 3 KiB stack scratch buffer.
+pub(crate) fn convert_rgb_to_srgb(icc: Option<&[u8]>, rgb: &mut [u8]) {
+    let Some(icc) = icc else { return };
+    if icc.is_empty() || icc.len() > MAX_PROFILE_BYTES {
+        return;
+    }
+    let parse_opts = ParsingOptions {
+        max_profile_size: MAX_PROFILE_BYTES + 1,
+        ..ParsingOptions::default()
+    };
+    let Ok(profile) = ColorProfile::new_from_slice_with_options(icc, parse_opts) else {
+        return;
+    };
+    if profile.color_space != DataColorSpace::Rgb {
+        return;
+    }
+    let options = TransformOptions {
+        rendering_intent: RenderingIntent::RelativeColorimetric,
+        ..TransformOptions::default()
+    };
+    let Ok(executor) = profile.create_transform_8bit(Layout::Rgb, &SRGB_PROFILE, Layout::Rgb, options) else {
+        return;
+    };
+    let mut probe_out = [0u8; PROBE_RGB.len()];
+    if executor.transform(&PROBE_RGB, &mut probe_out).is_err() || probe_out == PROBE_RGB {
+        return;
+    }
+    let valid_len = rgb.len() - (rgb.len() % 3);
+    let mut scratch = [0u8; 1024 * 3];
+    for chunk in rgb[..valid_len].chunks_mut(1024 * 3) {
+        let dst = &mut scratch[..chunk.len()];
+        if executor.transform(chunk, dst).is_ok() {
+            chunk.copy_from_slice(dst);
+        }
+    }
+}

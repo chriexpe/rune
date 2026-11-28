@@ -116,6 +116,8 @@ fn rest_forgets_unshown_live_slots_and_animation_starts_on_shared_pages() {
     let f1 = crate::mip_chain(16, 16, &[0, 255, 0, 255].repeat(16 * 16)).unwrap().mips;
     let motion = crate::animated::Motion {
         frames: vec![f1],
+        #[cfg(not(target_arch = "wasm32"))]
+        stream: None,
         ends: vec![0.1, 0.2],
         plays: None,
     };

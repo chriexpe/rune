@@ -540,8 +540,9 @@ pub struct ImageAtlas {
     pub pages: Vec<ImagePage>,
     slots: HashMap<(u64, usize), Slot>,
     /// When each animated image drawn here started playing, on the animation clock: its first
-    /// draw, kept while the atlas holds it.
-    starts: HashMap<u64, f64>,
+    /// draw, kept while the atlas holds it, plus a weak ref so evicted streaming animations drop
+    /// their background decoder buffers immediately.
+    starts: HashMap<u64, (f64, std::sync::Weak<crate::Decoded>)>,
     /// Monotonic frame counter advanced by `end_frame`, used for LRU eviction.
     frame: u64,
     /// Rects of touched slots replaced by a mid-frame resize, held until the frame finishes drawing.
@@ -624,14 +625,20 @@ impl ImageAtlas {
         let mut shown = 0;
         let mut next = None;
         let premultiplied = matches!(data, FrameData::Mips(_));
+        let mut held_frame: Option<crate::animated::FrameMips<'_>> = None;
         let bytes: &[u8] = match &data {
             FrameData::Mips(decoded) => {
-                let mips = match (&decoded.motion, now) {
+                let mips: &[crate::Mip] = match (&decoded.motion, now) {
                     (Some(motion), Some(now)) => {
-                        let start = *self.starts.entry(pixels.id).or_insert(now);
+                        let start = self
+                            .starts
+                            .entry(pixels.id)
+                            .or_insert_with(|| (now, Arc::downgrade(decoded)))
+                            .0;
                         let (i, change) = motion.at(now - start);
-                        (shown, next) = (i, change.map(|t| start + t));
-                        motion.frame(&decoded.mips, i)
+                        let (actual, frame) = motion.frame_for(&decoded.mips, i, &pixels.source);
+                        (shown, next) = (actual, change.map(|t| start + t));
+                        held_frame.insert(frame)
                     }
                     _ => &decoded.mips[..],
                 };
@@ -738,7 +745,16 @@ impl ImageAtlas {
         self.enforce_bounds();
         if !self.starts.is_empty() {
             let slots = &self.slots;
-            self.starts.retain(|id, _| slots.keys().any(|(slot, _)| slot == id));
+            self.starts.retain(|id, (_, weak)| {
+                let keep = slots.keys().any(|(slot, _)| slot == id);
+                if !keep
+                    && let Some(decoded) = weak.upgrade()
+                    && let Some(motion) = &decoded.motion
+                {
+                    motion.trim_idle();
+                }
+                keep
+            });
         }
         for slot in self.slots.values_mut() {
             slot.shown = std::mem::take(&mut slot.touched);
@@ -782,7 +798,16 @@ impl ImageAtlas {
             });
         }
         let slots = &self.slots;
-        self.starts.retain(|id, _| slots.keys().any(|(slot, _)| slot == id));
+        self.starts.retain(|id, (_, weak)| {
+            let keep = slots.keys().any(|(slot, _)| slot == id);
+            if !keep
+                && let Some(decoded) = weak.upgrade()
+                && let Some(motion) = &decoded.motion
+            {
+                motion.trim_idle();
+            }
+            keep
+        });
         for (i, page) in self.pages.iter_mut().enumerate() {
             if !self.slots.values().any(|slot| slot.page == i) {
                 page.empty();
@@ -800,7 +825,13 @@ impl ImageAtlas {
         let had = !self.pages.is_empty() || !self.slots.is_empty() || !self.starts.is_empty();
         self.pages.clear();
         self.slots.clear();
-        self.starts.clear();
+        for (_, (_, weak)) in self.starts.drain() {
+            if let Some(decoded) = weak.upgrade()
+                && let Some(motion) = &decoded.motion
+            {
+                motion.trim_idle();
+            }
+        }
         self.deferred_this_frame.clear();
         self.deferred_prev_frame.clear();
         had

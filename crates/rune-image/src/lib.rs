@@ -165,6 +165,18 @@ impl Image {
         d.intrinsic.or_else(|| d.mips.first().map(|m| [m.width as f32, m.height as f32]))
     }
     pub fn is_ready(&self) -> bool { self.0.decoded.get().is_some() }
+    /// Whether this image finished decoding as a multi-frame animation.
+    pub fn is_animated(&self) -> bool {
+        self.decoded().is_some_and(|r| r.is_ok_and(|d| d.motion.is_some()))
+    }
+    /// Exact live CPU pixel/decoder bytes currently held by this image (mip chains plus any
+    /// retained animation frames or streaming buffers). Returns `0` while pending or on error.
+    pub fn decoded_bytes(&self) -> usize {
+        let Some(Ok(d)) = self.decoded() else { return 0 };
+        let base: usize = d.mips.iter().fold(0usize, |acc, m| acc.saturating_add(m.pixels.len()));
+        let motion = d.motion.as_ref().map_or(0, |m| m.decoded_bytes());
+        base.saturating_add(motion)
+    }
     pub fn error(&self) -> Option<&ImageError> { self.0.decoded.get()?.as_ref().err().map(|f| &f.error) }
     /// Returns `true` when this image finished resolving and failed specifically because the
     /// requested icon or file was not found (as opposed to still pending, decoded, or failing
@@ -218,6 +230,7 @@ impl Image {
 enum Input {
     Encoded(Arc<[u8]>),
     EncodedScaled(Arc<[u8]>, u32),
+    EncodedScaledAnimated(Arc<[u8]>, u32),
     Rgba(u32, u32, Arc<[u8]>),
     Icon(
         #[cfg_attr(target_arch = "wasm32", allow(dead_code))] std::path::PathBuf,
@@ -239,10 +252,11 @@ enum Input {
 }
 
 impl Input {
-    fn decode(self) -> Result<Decoded, DecodeFailure> {
+    fn decode(self, alive: &dyn Fn() -> bool) -> Result<Decoded, DecodeFailure> {
         match self {
-            Input::Encoded(bytes) => decode(&bytes).map_err(DecodeFailure::from),
+            Input::Encoded(bytes) => decode_arc(bytes, alive).map_err(DecodeFailure::from),
             Input::EncodedScaled(bytes, max_px) => decode_scaled(&bytes, max_px).map_err(DecodeFailure::from),
+            Input::EncodedScaledAnimated(bytes, max_px) => decode_scaled_animated(bytes, max_px, alive).map_err(DecodeFailure::from),
             Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes).map_err(DecodeFailure::from),
             Input::Svg(bytes, px) => svg_rgba_with_size(&bytes, px)
                 .and_then(|(w, h, intrinsic, bytes)| mip_chain_with_intrinsic(w, h, &bytes, Some(intrinsic)))
@@ -260,11 +274,11 @@ impl Input {
                         .and_then(|(w, h, intrinsic, bytes)| mip_chain_with_intrinsic(w, h, &bytes, Some(intrinsic)))
                         .map_err(DecodeFailure::from)
                 } else {
-                    decode(&bytes).map_err(DecodeFailure::from)
+                    decode_arc(bytes.into(), alive).map_err(DecodeFailure::from)
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Input::Url(url, px) => Input::File(from_url::file_path(&url)?, px).decode(),
+            Input::Url(url, px) => Input::File(from_url::file_path(&url)?, px).decode(alive),
             #[cfg(target_arch = "wasm32")]
             Input::Icon(..) => Err(DecodeFailure::from(ImageError("filesystem images are unsupported on web".into()))),
             // Fetched asynchronously by `ImageCache::request`.
@@ -275,7 +289,7 @@ impl Input {
             #[cfg(all(test, not(target_arch = "wasm32")))]
             Input::Gated(input, release) => {
                 release.recv().map_err(|_| ImageError("test gate dropped".into()))?;
-                input.decode()
+                input.decode(alive)
             }
         }
     }
@@ -283,8 +297,8 @@ impl Input {
     /// `decode`, with a panic in a codec (a malformed file can still trip one) failing this
     /// image instead of unwinding the worker, which would leave it pending and fail every later one.
     #[cfg(not(target_arch = "wasm32"))]
-    fn decode_caught(self) -> Result<Decoded, DecodeFailure> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode())).unwrap_or_else(|panic| {
+    fn decode_caught(self, alive: &dyn Fn() -> bool) -> Result<Decoded, DecodeFailure> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode(alive))).unwrap_or_else(|panic| {
             let why = panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str));
             Err(DecodeFailure::from(ImageError(format!("image decoder panicked: {}", why.unwrap_or("no message")))))
         })
@@ -292,7 +306,7 @@ impl Input {
 }
 #[cfg(not(target_arch = "wasm32"))]
 enum JobTarget {
-    Image(Image),
+    Image(Weak<State>),
     Pixels { target: pixels::WeakPixels, ticket: u64 },
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -349,15 +363,22 @@ fn decode_jobs() {
             job
         };
         match job.target {
-            JobTarget::Image(image) => {
-                image.finish(job.input.decode_caught());
+            JobTarget::Image(weak) => {
+                if !wanted(&weak) {
+                    continue;
+                }
+                let decoded = job.input.decode_caught(&|| wanted(&weak));
+                let Some(state) = weak.upgrade() else {
+                    continue;
+                };
+                Image::new(state).finish(decoded);
                 (job.waker)();
             }
             JobTarget::Pixels { target, ticket } => {
                 if !target.is_current(ticket) {
                     continue;
                 }
-                if let Ok(decoded) = job.input.decode_caught()
+                if let Ok(decoded) = job.input.decode_caught(&|| target.is_current(ticket))
                     && target.store_mips_if_current(ticket, Arc::new(decoded))
                 {
                     (job.waker)();
@@ -445,6 +466,24 @@ impl ImageCache {
         hash.update(&max_px.to_le_bytes());
         hash.update(&bytes);
         self.request(*hash.finalize().as_bytes(), Input::EncodedScaled(bytes, max_px))
+    }
+
+    /// Like [`ImageCache::load_scaled`], downsampling raster frames to fit `size_pt` points square
+    /// at `scale` device pixels per point (never upscaling, preserving aspect ratio and ICC colour
+    /// management), while keeping animated GIF, WebP and APNG sequences animating.
+    ///
+    /// Small animations stay cached in memory; larger animations stream frames on demand through a
+    /// background stepper so memory stays bounded even on high-DPI displays. Non-animated images
+    /// decode identically to [`ImageCache::load_scaled`]. Handles are content-addressed separately
+    /// from [`ImageCache::load`] and [`ImageCache::load_scaled`].
+    pub fn load_scaled_animated(&self, bytes: impl Into<Arc<[u8]>>, size_pt: f32, scale: f32) -> Image {
+        let bytes = bytes.into();
+        let max_px = scaled_pixels(size_pt, scale);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"rune-encoded-scaled-animated\0");
+        hash.update(&max_px.to_le_bytes());
+        hash.update(&bytes);
+        self.request(*hash.finalize().as_bytes(), Input::EncodedScaledAnimated(bytes, max_px))
     }
 
     /// SVG or SVGZ bytes rasterized to fit `size_pt` points square at `scale` device pixels per
@@ -542,7 +581,7 @@ impl ImageCache {
         {
             let input = Input::Rgba(width, height, bytes);
             if u64::from(width) * u64::from(height) <= INLINE_RGBA_PIXELS {
-                if let Ok(decoded) = input.decode_caught()
+                if let Ok(decoded) = input.decode_caught(&|| true)
                     && target.store_mips_if_current(ticket, Arc::new(decoded))
                 {
                     (self.waker)();
@@ -614,13 +653,13 @@ impl ImageCache {
         // redrawn by that wake alone.
         #[cfg(not(target_arch = "wasm32"))]
         if let Input::Rgba(w, h, _) = &input && u64::from(*w) * u64::from(*h) <= INLINE_RGBA_PIXELS {
-            image.finish(input.decode_caught());
+            image.finish(input.decode_caught(&|| true));
             drop(entries);
             (self.waker)();
             return image;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !decode_later(Job { target: JobTarget::Image(image.clone()), input, waker: self.waker.clone() }) {
+        if !decode_later(Job { target: JobTarget::Image(Arc::downgrade(&image.0)), input, waker: self.waker.clone() }) {
             image.0.decoded.set(Err(DecodeFailure::from(ImageError("image worker stopped".into())))).ok();
         }
         #[cfg(target_arch = "wasm32")]
@@ -643,12 +682,12 @@ impl ImageCache {
                         if !wanted(&weak) { return; }
                         match decoded { Ok(fetched) => from_url::land_in_slices("image", fetched, 0, None).await, Err(e) => Err(e) }.map_err(DecodeFailure::from)
                     }
-                    Input::EncodedScaled(bytes, max_px) if browser_decodes(&bytes) => {
+                    Input::EncodedScaled(bytes, max_px) | Input::EncodedScaledAnimated(bytes, max_px) if browser_decodes(&bytes) => {
                         let decoded = from_url::decode_in_browser(&bytes).await;
                         if !wanted(&weak) { return; }
                         match decoded { Ok(fetched) => from_url::land_in_slices("image", fetched, max_px, Some(max_px)).await, Err(e) => Err(e) }.map_err(DecodeFailure::from)
                     }
-                    input => input.decode(),
+                    input => input.decode(&|| wanted(&weak)),
                 };
                 let Some(state) = weak.upgrade() else { return };
                 Image::new(state).finish(decoded);
@@ -719,19 +758,48 @@ fn read_regular_file_checked(path: &std::path::Path) -> Result<Vec<u8>, DecodeFa
     Ok(out)
 }
 
+#[cfg(test)]
 fn decode(bytes: &[u8]) -> Result<Decoded, ImageError> {
-    if is_svg(bytes) {
-        let (w, h, intrinsic, rgba) = svg_rgba_with_size(bytes, 0)?;
+    decode_arc(Arc::from(bytes), &|| true)
+}
+
+fn decode_arc(bytes: Arc<[u8]>, alive: &dyn Fn() -> bool) -> Result<Decoded, ImageError> {
+    if is_svg(&bytes) {
+        let (w, h, intrinsic, rgba) = svg_rgba_with_size(&bytes, 0)?;
         return mip_chain_with_intrinsic(w, h, &rgba, Some(intrinsic));
     }
-    if avif::is_avif(bytes) {
-        let (w, h, rgba) = avif::rgba(bytes)?;
+    if avif::is_avif(&bytes) {
+        let (w, h, rgba) = avif::rgba(&bytes)?;
         return mip_chain(w, h, &rgba);
     }
-    let bytes = if bytes.starts_with(b"icns") { icns_png(bytes)? } else { bytes };
-    if let Some(animation) = animated::decode(bytes) { return animation; }
-    let (w, h, rgba) = decode_still_raster(bytes)?;
+    if bytes.starts_with(b"icns") {
+        let png = icns_png(&bytes)?;
+        let (w, h, rgba) = decode_still_raster(png, None)?;
+        return mip_chain(w, h, &rgba);
+    }
+    if let Some(animation) = animated::decode(Arc::clone(&bytes), None, alive) {
+        return animation;
+    }
+    let (w, h, rgba) = decode_still_raster(&bytes, None)?;
     mip_chain(w, h, &rgba)
+}
+
+fn decode_scaled_animated(bytes: Arc<[u8]>, max_px: u32, alive: &dyn Fn() -> bool) -> Result<Decoded, ImageError> {
+    if is_svg(&bytes) {
+        let (w, h, intrinsic, rgba) = svg_rgba_with_size(&bytes, max_px)?;
+        return mip_chain_with_intrinsic(w, h, &rgba, Some(intrinsic));
+    }
+    if avif::is_avif(&bytes) {
+        let (w, h, rgba) = avif::rgba(&bytes)?;
+        let (w, h, rgba) = maybe_downsample_rgba(w, h, rgba, Some(max_px))?;
+        return mip_chain(w, h, &rgba);
+    }
+    if !bytes.starts_with(b"icns")
+        && let Some(animation) = animated::decode(Arc::clone(&bytes), Some(max_px), alive)
+    {
+        return animation;
+    }
+    decode_scaled(&bytes, max_px)
 }
 
 fn decode_scaled(bytes: &[u8], max_px: u32) -> Result<Decoded, ImageError> {
@@ -740,16 +808,16 @@ fn decode_scaled(bytes: &[u8], max_px: u32) -> Result<Decoded, ImageError> {
         return mip_chain_with_intrinsic(w, h, &rgba, Some(intrinsic));
     }
     let (w, h, rgba) = if avif::is_avif(bytes) {
-        avif::rgba(bytes)?
+        let (w, h, rgba) = avif::rgba(bytes)?;
+        maybe_downsample_rgba(w, h, rgba, Some(max_px))?
     } else {
         let bytes = if bytes.starts_with(b"icns") { icns_png(bytes)? } else { bytes };
-        decode_still_raster(bytes)?
+        decode_still_raster(bytes, Some(max_px))?
     };
-    let (w, h, rgba) = maybe_downsample_rgba(w, h, rgba, Some(max_px))?;
     mip_chain(w, h, &rgba)
 }
 
-fn decode_still_raster(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ImageError> {
+fn decode_still_raster(bytes: &[u8], max_px: Option<u32>) -> Result<(u32, u32, Vec<u8>), ImageError> {
     use image::ImageDecoder;
     let error = |e: image::ImageError| ImageError(e.to_string());
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -768,11 +836,22 @@ fn decode_still_raster(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ImageError> 
     let icc = decoder.icc_profile().ok().flatten();
     let mut image = image::DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
+    // Fast path for large opaque RGB8 images (e.g. phone JPEGs) when scaling down: apply ICC in
+    // place on RGB8 and area-resample straight into RGBA8, avoiding a full-res RGBA8 intermediate.
+    if let (Some(limit), image::DynamicImage::ImageRgb8(rgb)) = (max_px, &mut image) {
+        let (w, h) = (rgb.width(), rgb.height());
+        let (nw, nh) = scaled_dimensions(w, h, limit);
+        if (nw, nh) != (w, h) {
+            icc::convert_rgb_to_srgb(icc.as_deref(), rgb.as_mut());
+            let out = mips::downsample_rgb_to_rgba(w, h, rgb.as_raw(), nw, nh)?;
+            return Ok((nw, nh, out));
+        }
+    }
     let image = image.into_rgba8();
     let (w, h) = (image.width(), image.height());
     let mut raw = image.into_raw();
     icc::convert_rgba_to_srgb(icc.as_deref(), &mut raw);
-    Ok((w, h, raw))
+    maybe_downsample_rgba(w, h, raw, max_px)
 }
 
 /// A PNG decoded to 8-bit RGBA by the PNG decoder alone. `image::load_from_memory_with_format`
